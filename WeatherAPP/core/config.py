@@ -1,0 +1,12 @@
+WINDOW_WIDTH = 1600
+WINDOW_HEIGHT = 900
+
+FPS = 60
+
+MAP_PATH = "assets/maps/world_map.png"
+
+BACKGROUND_COLOR = "#050816"
+
+SHOW_WIND = True
+SHOW_DUST = True
+SHOW_ACID_RAIN = True
