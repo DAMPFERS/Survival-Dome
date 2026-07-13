@@ -2,16 +2,17 @@ from pymodbus.client import ModbusSerialClient
 import logging
 
 # === НАСТРОЙКИ (измените под себя) ===
-PORT = "COM9"          # COM-порт (Windows) или "/dev/ttyUSB0" (Linux)
+PORT = "COM16"          # COM-порт (Windows) или "/dev/ttyUSB0" (Linux)
 BAUDRATE = 19200       # Скорость (проверьте в документации инвертора)
 SLAVE_ID = 4          # Modbus ID инвертора (обычно 1)
-TIMEOUT = 1           # Таймаут подключения (секунды)
+TIMEOUT = 2           # Таймаут подключения (секунды)
 
 # Диапазоны регистров для сканирования (из вашего кода)
 REGISTER_RANGES = [
-    (25269, 25290),    # Основной диапазон (статусы, RatedPowerW)
-    (16100, 16110),    # PV1
-    (16200, 16210),    # PV2
+    (25269, 25274),    # Основной диапазон (статусы, RatedPowerW)
+    (15201, 15217),
+    (15218, 15342)
+
 ]
 
 # Настройка логгирования
@@ -46,6 +47,11 @@ def main():
                 count=count,
                 device_id=SLAVE_ID
             )
+            # response = client.read_input_registers(
+            #     address=start,
+            #     count=count,
+            #     device_id=SLAVE_ID
+            # )
 
             if response.isError():
                 logger.error(f"Ошибка чтения диапазона {start}-{end}: {response}")
