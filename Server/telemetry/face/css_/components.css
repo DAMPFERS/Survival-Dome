@@ -1,0 +1,206 @@
+/* Здесь начинаются реальные элементы интерфейса */
+
+/* Базовая панель */
+.panel {
+
+    position: relative;
+
+    background: var(--bg-panel);
+
+    border: 1px solid var(--border-line);
+
+    clip-path: var(--panel-clip);
+
+    padding: var(--space-4);
+
+    overflow: hidden;
+}
+
+.panel::before {
+
+    content: "";
+
+    position: absolute;
+
+    top: 0;
+    left: 0;
+
+    width: 2px;
+
+    height: 100%;
+
+    background: var(--cyan);
+
+    opacity: .6;
+}
+
+/* Заголовок панели */
+.panel__header {
+
+    display: flex;
+
+    align-items: center;
+
+    gap: var(--space-3);
+
+    margin-bottom: var(--space-4);
+}
+
+.panel__header::after {
+
+    content: "";
+
+    flex: 1;
+
+    height: 1px;
+
+    background: var(--border-line);
+}
+
+/* Value Block */
+.value-block {
+
+    display: flex;
+
+    flex-direction: column;
+
+    gap: var(--space-2);
+}
+
+/* Sparkline */
+.sparkline {
+
+    width: 100%;
+
+    height: 48px;
+}
+
+.sparkline polyline {
+
+    fill: none;
+
+    stroke: var(--cyan);
+
+    stroke-width: 2;
+}
+
+/* Status Dot */
+.status-dot {
+
+    width: 8px;
+
+    height: 8px;
+
+    border-radius: 50%;
+
+    background: var(--ok);
+
+    box-shadow: 0 0 8px currentColor;
+}
+
+.status-dot--warning {
+    background: var(--orange);
+}
+
+.status-dot--danger {
+
+    background: var(--danger);
+
+    animation: status-blink 1s infinite;
+}
+
+/* Badge */
+.badge {
+
+    display: inline-flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    min-width: 24px;
+
+    height: 20px;
+
+    padding: 0 8px;
+
+    border: 1px solid var(--cyan);
+
+    color: var(--cyan);
+
+    font-size: var(--fs-xs);
+
+    font-family: var(--font-data);
+
+    clip-path: var(--btn-clip);
+}
+
+/* HUD Toggle */
+.hud-toggle {
+
+    display: flex;
+
+    flex-direction: column;
+
+    gap: 6px;
+
+    padding: 12px;
+
+    cursor: pointer;
+
+    user-select: none;
+
+    background: var(--bg-panel-alt);
+
+    border: 1px solid var(--cyan-dim);
+
+    clip-path: var(--btn-clip);
+
+    transition: var(--transition-normal);
+}
+
+.hud-toggle:hover {
+
+    border-color: var(--cyan);
+
+    box-shadow: var(--glow-cyan);
+}
+
+.hud-toggle--on {
+
+    background:
+        linear-gradient(
+            135deg,
+            rgba(255,138,61,.18),
+            rgba(255,138,61,.04)
+        );
+
+    border-color: var(--orange);
+
+    box-shadow: var(--glow-orange);
+}
+
+.hud-toggle__name {
+
+    font-size: var(--fs-sm);
+
+    text-transform: uppercase;
+
+    letter-spacing: .08em;
+}
+
+.hud-toggle__power {
+
+    font-family: var(--font-data);
+
+    font-size: var(--fs-md);
+
+    color: var(--text-primary);
+}
+
+.hud-toggle__state {
+
+    color: var(--orange);
+
+    font-size: var(--fs-xs);
+}

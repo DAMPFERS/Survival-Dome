@@ -1,0 +1,32 @@
+.u-glow {
+    box-shadow: var(--glow-cyan);
+}
+
+.u-hidden {
+    display: none !important;
+}
+
+.u-center {
+    display: flex;
+
+    justify-content: center;
+
+    align-items: center;
+}
+
+.u-data-font {
+    font-family: var(--font-data);
+}
+
+.u-uppercase {
+    text-transform: uppercase;
+}
+
+.u-truncate {
+
+    overflow: hidden;
+
+    white-space: nowrap;
+
+    text-overflow: ellipsis;
+}

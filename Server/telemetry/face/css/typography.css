@@ -1,0 +1,39 @@
+.ui-label {
+
+    color: var(--text-secondary);
+
+    font-size: var(--fs-sm);
+
+    text-transform: uppercase;
+
+    letter-spacing: 0.12em;
+
+    font-weight: 600;
+}
+
+.value {
+
+    font-family: var(--font-data);
+
+    color: var(--text-primary);
+
+    line-height: 1;
+
+    font-weight: 700;
+}
+
+.value--lg {
+    font-size: var(--fs-lg);
+}
+
+.value--xl {
+    font-size: var(--fs-xl);
+}
+
+.value--danger {
+    color: var(--danger);
+}
+
+.value--ok {
+    color: var(--ok);
+}
