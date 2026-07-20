@@ -14,7 +14,7 @@ ACCUM discharge/buy/load/self_use и т.д.) с экраном "Solar Power Moni
 from pymodbus.client import ModbusSerialClient
 import logging
 
-PORT = "COM16"
+PORT = "COM4"
 BAUDRATE = 19200
 SLAVE_ID = 4
 TIMEOUT = 1
