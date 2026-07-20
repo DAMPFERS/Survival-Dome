@@ -1,0 +1,313 @@
+{
+    "result": [
+        {
+            "active_time": 1783952229,
+            "biz_type": 18,
+            "category": "dlq",
+            "create_time": 1783950472,
+            "icon": "smart/icon/bay16570761439434Ehc/59407147520c567319236ce80b4181c7.jpg",
+            "id": "bfb1c8ae96a0f61b84fphs",
+            "ip": "217.107.104.172",
+            "lat": "55.93",
+            "local_key": "gcFlH4i4PgO+`O#4",
+            "lon": "37.49",
+            "model": "TO-Q-SY2-JWT",
+            "name": "WiFi \u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b\u044c SY2 \u0441 \u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435\u043c \u044d\u043d\u0435\u0440\u0433\u043e\u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u044f",
+            "online": true,
+            "owner_id": "297826558",
+            "product_id": "3lbgj7cu27nsmh0w",
+            "product_name": "SY2 WiFi switch with metering ",
+            "status": [
+                {
+                    "code": "switch",
+                    "value": false
+                },
+                {
+                    "code": "countdown_1",
+                    "value": 0
+                },
+                {
+                    "code": "add_ele",
+                    "value": 3
+                },
+                {
+                    "code": "cur_current",
+                    "value": 0
+                },
+                {
+                    "code": "cur_power",
+                    "value": 0
+                },
+                {
+                    "code": "cur_voltage",
+                    "value": 2399
+                },
+                {
+                    "code": "test_bit",
+                    "value": 1
+                },
+                {
+                    "code": "voltage_coe",
+                    "value": 15791
+                },
+                {
+                    "code": "electric_coe",
+                    "value": 12374
+                },
+                {
+                    "code": "power_coe",
+                    "value": 3031
+                },
+                {
+                    "code": "electricity_coe",
+                    "value": 2601
+                },
+                {
+                    "code": "fault",
+                    "value": 0
+                },
+                {
+                    "code": "relay_status",
+                    "value": "last"
+                },
+                {
+                    "code": "light_mode",
+                    "value": "relay"
+                },
+                {
+                    "code": "child_lock",
+                    "value": false
+                },
+                {
+                    "code": "cycle_time",
+                    "value": ""
+                },
+                {
+                    "code": "temp_value",
+                    "value": 30
+                },
+                {
+                    "code": "alarm_set_1",
+                    "value": "BQEAZAcAAAA="
+                },
+                {
+                    "code": "alarm_set_2",
+                    "value": "AQEAQQMBAQkEAQBM"
+                },
+                {
+                    "code": "online_state",
+                    "value": "online"
+                }
+            ],
+            "sub": false,
+            "time_zone": "+03:00",
+            "uid": "eu1783952176529S3MIh",
+            "update_time": 1783952231,
+            "uuid": "04eb1028722369de",
+            "category_name": "Circuit breaker",
+            "gateway_id": "",
+            "mapping": {
+                "1": {
+                    "code": "switch",
+                    "type": "Boolean",
+                    "values": {}
+                },
+                "9": {
+                    "code": "countdown_1",
+                    "type": "Integer",
+                    "values": {
+                        "unit": "s",
+                        "min": 0,
+                        "max": 86400,
+                        "scale": 0,
+                        "step": 1
+                    }
+                },
+                "17": {
+                    "code": "add_ele",
+                    "type": "Integer",
+                    "values": {
+                        "unit": "",
+                        "min": 0,
+                        "max": 9999999,
+                        "scale": 3,
+                        "step": 100
+                    }
+                },
+                "18": {
+                    "code": "cur_current",
+                    "type": "Integer",
+                    "values": {
+                        "unit": "mA",
+                        "min": 0,
+                        "max": 100000,
+                        "scale": 0,
+                        "step": 1
+                    }
+                },
+                "19": {
+                    "code": "cur_power",
+                    "type": "Integer",
+                    "values": {
+                        "unit": "W",
+                        "min": 0,
+                        "max": 999999,
+                        "scale": 1,
+                        "step": 1
+                    }
+                },
+                "20": {
+                    "code": "cur_voltage",
+                    "type": "Integer",
+                    "values": {
+                        "unit": "V",
+                        "min": 0,
+                        "max": 5000,
+                        "scale": 1,
+                        "step": 1
+                    }
+                },
+                "21": {
+                    "code": "test_bit",
+                    "type": "Integer",
+                    "values": {
+                        "min": 0,
+                        "max": 5,
+                        "scale": 0,
+                        "step": 1
+                    }
+                },
+                "22": {
+                    "code": "voltage_coe",
+                    "type": "Integer",
+                    "values": {
+                        "min": 0,
+                        "max": 1000000,
+                        "scale": 0,
+                        "step": 1
+                    }
+                },
+                "23": {
+                    "code": "electric_coe",
+                    "type": "Integer",
+                    "values": {
+                        "min": 0,
+                        "max": 1000000,
+                        "scale": 0,
+                        "step": 1
+                    }
+                },
+                "24": {
+                    "code": "power_coe",
+                    "type": "Integer",
+                    "values": {
+                        "min": 0,
+                        "max": 1000000,
+                        "scale": 0,
+                        "step": 1
+                    }
+                },
+                "25": {
+                    "code": "electricity_coe",
+                    "type": "Integer",
+                    "values": {
+                        "min": 0,
+                        "max": 1000000,
+                        "scale": 0,
+                        "step": 1
+                    }
+                },
+                "26": {
+                    "code": "fault",
+                    "type": "Bitmap",
+                    "values": {
+                        "label": [
+                            "ov_cr",
+                            "ov_vol",
+                            "ov_pwr",
+                            "ls_cr",
+                            "ls_vol",
+                            "ls_pow"
+                        ]
+                    }
+                },
+                "38": {
+                    "code": "relay_status",
+                    "type": "Enum",
+                    "values": {
+                        "range": [
+                            "power_off",
+                            "power_on",
+                            "last"
+                        ]
+                    }
+                },
+                "40": {
+                    "code": "light_mode",
+                    "type": "Enum",
+                    "values": {
+                        "range": [
+                            "relay",
+                            "pos",
+                            "none",
+                            "on"
+                        ]
+                    }
+                },
+                "41": {
+                    "code": "child_lock",
+                    "type": "Boolean",
+                    "values": {}
+                },
+                "42": {
+                    "code": "cycle_time",
+                    "type": "String",
+                    "values": "{\"maxlen\":255}"
+                },
+                "47": {
+                    "code": "temp_value",
+                    "type": "Integer",
+                    "values": {
+                        "unit": "\u00b0C",
+                        "min": 0,
+                        "max": 999,
+                        "scale": 0,
+                        "step": 1
+                    }
+                },
+                "48": {
+                    "code": "alarm_set_1",
+                    "type": "Raw",
+                    "values": {}
+                },
+                "49": {
+                    "code": "alarm_set_2",
+                    "type": "Raw",
+                    "values": {}
+                },
+                "66": {
+                    "code": "online_state",
+                    "type": "Enum",
+                    "values": {
+                        "range": [
+                            "online",
+                            "offline"
+                        ]
+                    }
+                }
+            }
+        }
+    ],
+    "success": true,
+    "t": 1783952411292,
+    "tid": "f52be7397ec511f195391e6d38843e97",
+    "fetches": 1,
+    "total": 1,
+    "file": {
+        "name": "tuya-raw.json",
+        "description": "Full raw list of Tuya devices.",
+        "account": "9k9rgyssqr7kfsgf3ng3",
+        "date": "2026-07-13T17:15:10.220408",
+        "tinytuya": "1.20.0"
+    }
+}

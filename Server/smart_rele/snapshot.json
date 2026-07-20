@@ -1,0 +1,45 @@
+{
+    "timestamp": 1783952115.1323307,
+    "devices": [
+        {
+            "id": "bfb1c8ae96a0f61b84fphs",
+            "ip": "192.168.137.193",
+            "active": 2,
+            "encrypt": true,
+            "productKey": "keyuh3jxk9wu8ruj",
+            "token": true,
+            "wf_cfg": true,
+            "clientLink": 3,
+            "name": "WiFi \u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b\u044c SY2 \u0441 \u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435\u043c \u044d\u043d\u0435\u0440\u0433\u043e\u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u044f",
+            "key": "gcFlH4i4PgO+`O#4",
+            "mac": "bc:35:1e:7e:1a:ac",
+            "ability": 0,
+            "dev_type": "default",
+            "err": "",
+            "type": "default",
+            "dps": {
+                "dps": {
+                    "1": false,
+                    "9": 0,
+                    "18": 0,
+                    "19": 0,
+                    "20": 2403,
+                    "21": 1,
+                    "22": 15791,
+                    "23": 12374,
+                    "24": 3031,
+                    "25": 2601,
+                    "26": 0,
+                    "38": "memory",
+                    "40": "relay",
+                    "41": false,
+                    "42": "",
+                    "47": 30,
+                    "66": "online"
+                }
+            },
+            "origin": "broadcast",
+            "ver": "3.5"
+        }
+    ]
+}

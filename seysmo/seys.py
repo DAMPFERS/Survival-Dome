@@ -135,7 +135,7 @@ if __name__ == "__main__":
 
     # 3. Генерация
     sim = SeismicBatchSimulator(vp=6.0, vs=3.5, q=120)
-    metrics = sim.generate_batch(eq, sensors, output_dir="D:/PROGRAMS/nn")
+    metrics = sim.generate_batch(eq, sensors, output_dir="D:/PROGRAMS/Survival-Dome/seysmo/data")
 
     # 4. Интеграция в игровую логику
     for sid, m in metrics.items():
