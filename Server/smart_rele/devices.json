@@ -1,8 +1,8 @@
 [
     {
-        "name": "WiFi \u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b\u044c SY2 \u0441 \u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435\u043c \u044d\u043d\u0435\u0440\u0433\u043e\u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u044f",
+        "name": "WiFi \u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b\u044c SY2 \u0441 \u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435\u043c \u044d\u043d\u0435\u0440\u0433\u043e\u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u044f 9",
         "id": "bfb1c8ae96a0f61b84fphs",
-        "key": "gcFlH4i4PgO+`O#4",
+        "key": "ESr2pzGG<@~]=w4h",
         "mac": "bc:35:1e:7e:1a:ac",
         "uuid": "04eb1028722369de",
         "sn": "10021363600CBA",
@@ -203,7 +203,1533 @@
                 }
             }
         },
-        "ip": "192.168.137.193",
+        "ip": "192.168.8.34",
+        "version": "3.5"
+    },
+    {
+        "name": "WiFi \u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b\u044c SY2 \u0441 \u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435\u043c \u044d\u043d\u0435\u0440\u0433\u043e\u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u044f 8",
+        "id": "bf7f8a04d3d6ea04f2nwhq",
+        "key": "yS1o`:e3Po*9[SS+",
+        "mac": "d8:c8:0c:b2:98:cc",
+        "uuid": "8d96b20ccc0e3164",
+        "sn": "100199363000C0",
+        "category": "dlq",
+        "product_name": "SY2 WiFi switch with metering ",
+        "product_id": "3lbgj7cu27nsmh0w",
+        "biz_type": 18,
+        "model": "TO-Q-SY2-JWT",
+        "sub": false,
+        "icon": "https://images.tuyaeu.com/smart/icon/bay16570761439434Ehc/59407147520c567319236ce80b4181c7.jpg",
+        "mapping": {
+            "1": {
+                "code": "switch",
+                "type": "Boolean",
+                "values": {}
+            },
+            "9": {
+                "code": "countdown_1",
+                "type": "Integer",
+                "values": {
+                    "unit": "s",
+                    "min": 0,
+                    "max": 86400,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "17": {
+                "code": "add_ele",
+                "type": "Integer",
+                "values": {
+                    "unit": "",
+                    "min": 0,
+                    "max": 9999999,
+                    "scale": 3,
+                    "step": 100
+                }
+            },
+            "18": {
+                "code": "cur_current",
+                "type": "Integer",
+                "values": {
+                    "unit": "mA",
+                    "min": 0,
+                    "max": 100000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "19": {
+                "code": "cur_power",
+                "type": "Integer",
+                "values": {
+                    "unit": "W",
+                    "min": 0,
+                    "max": 999999,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "20": {
+                "code": "cur_voltage",
+                "type": "Integer",
+                "values": {
+                    "unit": "V",
+                    "min": 0,
+                    "max": 5000,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "21": {
+                "code": "test_bit",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 5,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "22": {
+                "code": "voltage_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "23": {
+                "code": "electric_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "24": {
+                "code": "power_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "25": {
+                "code": "electricity_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "26": {
+                "code": "fault",
+                "type": "Bitmap",
+                "values": {
+                    "label": [
+                        "ov_cr",
+                        "ov_vol",
+                        "ov_pwr",
+                        "ls_cr",
+                        "ls_vol",
+                        "ls_pow"
+                    ]
+                }
+            },
+            "38": {
+                "code": "relay_status",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "power_off",
+                        "power_on",
+                        "last"
+                    ]
+                }
+            },
+            "40": {
+                "code": "light_mode",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "relay",
+                        "pos",
+                        "none",
+                        "on"
+                    ]
+                }
+            },
+            "41": {
+                "code": "child_lock",
+                "type": "Boolean",
+                "values": {}
+            },
+            "42": {
+                "code": "cycle_time",
+                "type": "String",
+                "values": "{\"maxlen\":255}"
+            },
+            "47": {
+                "code": "temp_value",
+                "type": "Integer",
+                "values": {
+                    "unit": "\u00b0C",
+                    "min": 0,
+                    "max": 999,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "48": {
+                "code": "alarm_set_1",
+                "type": "Raw",
+                "values": {}
+            },
+            "49": {
+                "code": "alarm_set_2",
+                "type": "Raw",
+                "values": {}
+            },
+            "66": {
+                "code": "online_state",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "online",
+                        "offline"
+                    ]
+                }
+            }
+        },
+        "ip": "192.168.8.33",
+        "version": "3.5"
+    },
+    {
+        "name": "WiFi \u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b\u044c SY2 \u0441 \u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435\u043c \u044d\u043d\u0435\u0440\u0433\u043e\u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u044f 7",
+        "id": "bf191de6c5e2f9b8afyyrk",
+        "key": "r21}Sf*cykbd^MI<",
+        "mac": "3c:0b:59:b8:65:2c",
+        "uuid": "b4582cb8cbb2a2d5",
+        "sn": "1001993630A12C",
+        "category": "dlq",
+        "product_name": "SY2 WiFi switch with metering ",
+        "product_id": "3lbgj7cu27nsmh0w",
+        "biz_type": 18,
+        "model": "TO-Q-SY2-JWT",
+        "sub": false,
+        "icon": "https://images.tuyaeu.com/smart/icon/bay16570761439434Ehc/59407147520c567319236ce80b4181c7.jpg",
+        "mapping": {
+            "1": {
+                "code": "switch",
+                "type": "Boolean",
+                "values": {}
+            },
+            "9": {
+                "code": "countdown_1",
+                "type": "Integer",
+                "values": {
+                    "unit": "s",
+                    "min": 0,
+                    "max": 86400,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "17": {
+                "code": "add_ele",
+                "type": "Integer",
+                "values": {
+                    "unit": "",
+                    "min": 0,
+                    "max": 9999999,
+                    "scale": 3,
+                    "step": 100
+                }
+            },
+            "18": {
+                "code": "cur_current",
+                "type": "Integer",
+                "values": {
+                    "unit": "mA",
+                    "min": 0,
+                    "max": 100000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "19": {
+                "code": "cur_power",
+                "type": "Integer",
+                "values": {
+                    "unit": "W",
+                    "min": 0,
+                    "max": 999999,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "20": {
+                "code": "cur_voltage",
+                "type": "Integer",
+                "values": {
+                    "unit": "V",
+                    "min": 0,
+                    "max": 5000,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "21": {
+                "code": "test_bit",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 5,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "22": {
+                "code": "voltage_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "23": {
+                "code": "electric_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "24": {
+                "code": "power_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "25": {
+                "code": "electricity_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "26": {
+                "code": "fault",
+                "type": "Bitmap",
+                "values": {
+                    "label": [
+                        "ov_cr",
+                        "ov_vol",
+                        "ov_pwr",
+                        "ls_cr",
+                        "ls_vol",
+                        "ls_pow"
+                    ]
+                }
+            },
+            "38": {
+                "code": "relay_status",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "power_off",
+                        "power_on",
+                        "last"
+                    ]
+                }
+            },
+            "40": {
+                "code": "light_mode",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "relay",
+                        "pos",
+                        "none",
+                        "on"
+                    ]
+                }
+            },
+            "41": {
+                "code": "child_lock",
+                "type": "Boolean",
+                "values": {}
+            },
+            "42": {
+                "code": "cycle_time",
+                "type": "String",
+                "values": "{\"maxlen\":255}"
+            },
+            "47": {
+                "code": "temp_value",
+                "type": "Integer",
+                "values": {
+                    "unit": "\u00b0C",
+                    "min": 0,
+                    "max": 999,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "48": {
+                "code": "alarm_set_1",
+                "type": "Raw",
+                "values": {}
+            },
+            "49": {
+                "code": "alarm_set_2",
+                "type": "Raw",
+                "values": {}
+            },
+            "66": {
+                "code": "online_state",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "online",
+                        "offline"
+                    ]
+                }
+            }
+        },
+        "ip": "192.168.8.32",
+        "version": "3.5"
+    },
+    {
+        "name": "WiFi \u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b\u044c SY2 \u0441 \u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435\u043c \u044d\u043d\u0435\u0440\u0433\u043e\u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u044f 6",
+        "id": "bf9322c1705a091c5absxh",
+        "key": "v-<`pWjK1D/.P36Z",
+        "mac": "3c:0b:59:b7:bd:e2",
+        "uuid": "e84e2bd72b624685",
+        "sn": "10019936300191",
+        "category": "dlq",
+        "product_name": "SY2 WiFi switch with metering ",
+        "product_id": "3lbgj7cu27nsmh0w",
+        "biz_type": 18,
+        "model": "TO-Q-SY2-JWT",
+        "sub": false,
+        "icon": "https://images.tuyaeu.com/smart/icon/bay16570761439434Ehc/59407147520c567319236ce80b4181c7.jpg",
+        "mapping": {
+            "1": {
+                "code": "switch",
+                "type": "Boolean",
+                "values": {}
+            },
+            "9": {
+                "code": "countdown_1",
+                "type": "Integer",
+                "values": {
+                    "unit": "s",
+                    "min": 0,
+                    "max": 86400,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "17": {
+                "code": "add_ele",
+                "type": "Integer",
+                "values": {
+                    "unit": "",
+                    "min": 0,
+                    "max": 9999999,
+                    "scale": 3,
+                    "step": 100
+                }
+            },
+            "18": {
+                "code": "cur_current",
+                "type": "Integer",
+                "values": {
+                    "unit": "mA",
+                    "min": 0,
+                    "max": 100000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "19": {
+                "code": "cur_power",
+                "type": "Integer",
+                "values": {
+                    "unit": "W",
+                    "min": 0,
+                    "max": 999999,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "20": {
+                "code": "cur_voltage",
+                "type": "Integer",
+                "values": {
+                    "unit": "V",
+                    "min": 0,
+                    "max": 5000,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "21": {
+                "code": "test_bit",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 5,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "22": {
+                "code": "voltage_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "23": {
+                "code": "electric_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "24": {
+                "code": "power_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "25": {
+                "code": "electricity_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "26": {
+                "code": "fault",
+                "type": "Bitmap",
+                "values": {
+                    "label": [
+                        "ov_cr",
+                        "ov_vol",
+                        "ov_pwr",
+                        "ls_cr",
+                        "ls_vol",
+                        "ls_pow"
+                    ]
+                }
+            },
+            "38": {
+                "code": "relay_status",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "power_off",
+                        "power_on",
+                        "last"
+                    ]
+                }
+            },
+            "40": {
+                "code": "light_mode",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "relay",
+                        "pos",
+                        "none",
+                        "on"
+                    ]
+                }
+            },
+            "41": {
+                "code": "child_lock",
+                "type": "Boolean",
+                "values": {}
+            },
+            "42": {
+                "code": "cycle_time",
+                "type": "String",
+                "values": "{\"maxlen\":255}"
+            },
+            "47": {
+                "code": "temp_value",
+                "type": "Integer",
+                "values": {
+                    "unit": "\u00b0C",
+                    "min": 0,
+                    "max": 999,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "48": {
+                "code": "alarm_set_1",
+                "type": "Raw",
+                "values": {}
+            },
+            "49": {
+                "code": "alarm_set_2",
+                "type": "Raw",
+                "values": {}
+            },
+            "66": {
+                "code": "online_state",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "online",
+                        "offline"
+                    ]
+                }
+            }
+        },
+        "ip": "192.168.8.31",
+        "version": "3.5"
+    },
+    {
+        "name": "WiFi \u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b\u044c SY2 \u0441 \u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435\u043c \u044d\u043d\u0435\u0440\u0433\u043e\u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u044f 5",
+        "id": "bf1812bfb2d18ce9ddkvsn",
+        "key": "YZ9WKV;+4/7Vzw|'",
+        "mac": "3c:0b:59:b8:4e:b6",
+        "uuid": "170cc3305a42a04d",
+        "sn": "100199363089C7",
+        "category": "dlq",
+        "product_name": "SY2 WiFi switch with metering ",
+        "product_id": "3lbgj7cu27nsmh0w",
+        "biz_type": 18,
+        "model": "TO-Q-SY2-JWT",
+        "sub": false,
+        "icon": "https://images.tuyaeu.com/smart/icon/bay16570761439434Ehc/59407147520c567319236ce80b4181c7.jpg",
+        "mapping": {
+            "1": {
+                "code": "switch",
+                "type": "Boolean",
+                "values": {}
+            },
+            "9": {
+                "code": "countdown_1",
+                "type": "Integer",
+                "values": {
+                    "unit": "s",
+                    "min": 0,
+                    "max": 86400,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "17": {
+                "code": "add_ele",
+                "type": "Integer",
+                "values": {
+                    "unit": "",
+                    "min": 0,
+                    "max": 9999999,
+                    "scale": 3,
+                    "step": 100
+                }
+            },
+            "18": {
+                "code": "cur_current",
+                "type": "Integer",
+                "values": {
+                    "unit": "mA",
+                    "min": 0,
+                    "max": 100000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "19": {
+                "code": "cur_power",
+                "type": "Integer",
+                "values": {
+                    "unit": "W",
+                    "min": 0,
+                    "max": 999999,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "20": {
+                "code": "cur_voltage",
+                "type": "Integer",
+                "values": {
+                    "unit": "V",
+                    "min": 0,
+                    "max": 5000,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "21": {
+                "code": "test_bit",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 5,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "22": {
+                "code": "voltage_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "23": {
+                "code": "electric_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "24": {
+                "code": "power_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "25": {
+                "code": "electricity_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "26": {
+                "code": "fault",
+                "type": "Bitmap",
+                "values": {
+                    "label": [
+                        "ov_cr",
+                        "ov_vol",
+                        "ov_pwr",
+                        "ls_cr",
+                        "ls_vol",
+                        "ls_pow"
+                    ]
+                }
+            },
+            "38": {
+                "code": "relay_status",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "power_off",
+                        "power_on",
+                        "last"
+                    ]
+                }
+            },
+            "40": {
+                "code": "light_mode",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "relay",
+                        "pos",
+                        "none",
+                        "on"
+                    ]
+                }
+            },
+            "41": {
+                "code": "child_lock",
+                "type": "Boolean",
+                "values": {}
+            },
+            "42": {
+                "code": "cycle_time",
+                "type": "String",
+                "values": "{\"maxlen\":255}"
+            },
+            "47": {
+                "code": "temp_value",
+                "type": "Integer",
+                "values": {
+                    "unit": "\u00b0C",
+                    "min": 0,
+                    "max": 999,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "48": {
+                "code": "alarm_set_1",
+                "type": "Raw",
+                "values": {}
+            },
+            "49": {
+                "code": "alarm_set_2",
+                "type": "Raw",
+                "values": {}
+            },
+            "66": {
+                "code": "online_state",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "online",
+                        "offline"
+                    ]
+                }
+            }
+        },
+        "ip": "192.168.8.30",
+        "version": "3.5"
+    },
+    {
+        "name": "WiFi \u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b\u044c SY2 \u0441 \u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435\u043c \u044d\u043d\u0435\u0440\u0433\u043e\u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u044f 4",
+        "id": "bf8c7f04c16e60cf708gns",
+        "key": "_#z.Gi|+[bi-EkLr",
+        "mac": "3c:0b:59:b8:0c:d2",
+        "uuid": "cfad19fc6b19ffd4",
+        "sn": "1001993630476E",
+        "category": "dlq",
+        "product_name": "SY2 WiFi switch with metering ",
+        "product_id": "3lbgj7cu27nsmh0w",
+        "biz_type": 18,
+        "model": "TO-Q-SY2-JWT",
+        "sub": false,
+        "icon": "https://images.tuyaeu.com/smart/icon/bay16570761439434Ehc/59407147520c567319236ce80b4181c7.jpg",
+        "mapping": {
+            "1": {
+                "code": "switch",
+                "type": "Boolean",
+                "values": {}
+            },
+            "9": {
+                "code": "countdown_1",
+                "type": "Integer",
+                "values": {
+                    "unit": "s",
+                    "min": 0,
+                    "max": 86400,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "17": {
+                "code": "add_ele",
+                "type": "Integer",
+                "values": {
+                    "unit": "",
+                    "min": 0,
+                    "max": 9999999,
+                    "scale": 3,
+                    "step": 100
+                }
+            },
+            "18": {
+                "code": "cur_current",
+                "type": "Integer",
+                "values": {
+                    "unit": "mA",
+                    "min": 0,
+                    "max": 100000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "19": {
+                "code": "cur_power",
+                "type": "Integer",
+                "values": {
+                    "unit": "W",
+                    "min": 0,
+                    "max": 999999,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "20": {
+                "code": "cur_voltage",
+                "type": "Integer",
+                "values": {
+                    "unit": "V",
+                    "min": 0,
+                    "max": 5000,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "21": {
+                "code": "test_bit",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 5,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "22": {
+                "code": "voltage_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "23": {
+                "code": "electric_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "24": {
+                "code": "power_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "25": {
+                "code": "electricity_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "26": {
+                "code": "fault",
+                "type": "Bitmap",
+                "values": {
+                    "label": [
+                        "ov_cr",
+                        "ov_vol",
+                        "ov_pwr",
+                        "ls_cr",
+                        "ls_vol",
+                        "ls_pow"
+                    ]
+                }
+            },
+            "38": {
+                "code": "relay_status",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "power_off",
+                        "power_on",
+                        "last"
+                    ]
+                }
+            },
+            "40": {
+                "code": "light_mode",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "relay",
+                        "pos",
+                        "none",
+                        "on"
+                    ]
+                }
+            },
+            "41": {
+                "code": "child_lock",
+                "type": "Boolean",
+                "values": {}
+            },
+            "42": {
+                "code": "cycle_time",
+                "type": "String",
+                "values": "{\"maxlen\":255}"
+            },
+            "47": {
+                "code": "temp_value",
+                "type": "Integer",
+                "values": {
+                    "unit": "\u00b0C",
+                    "min": 0,
+                    "max": 999,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "48": {
+                "code": "alarm_set_1",
+                "type": "Raw",
+                "values": {}
+            },
+            "49": {
+                "code": "alarm_set_2",
+                "type": "Raw",
+                "values": {}
+            },
+            "66": {
+                "code": "online_state",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "online",
+                        "offline"
+                    ]
+                }
+            }
+        },
+        "ip": "192.168.8.29",
+        "version": "3.5"
+    },
+    {
+        "name": "WiFi \u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b\u044c SY2 \u0441 \u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435\u043c \u044d\u043d\u0435\u0440\u0433\u043e\u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u044f 3",
+        "id": "bfac2e9d88c981d76e9k2x",
+        "key": "Ao]ULnbA]CnHKuG#",
+        "mac": "3c:0b:59:b7:ca:49",
+        "uuid": "cc79a162a1b5584f",
+        "sn": "100199363014BD",
+        "category": "dlq",
+        "product_name": "SY2 WiFi switch with metering ",
+        "product_id": "3lbgj7cu27nsmh0w",
+        "biz_type": 18,
+        "model": "TO-Q-SY2-JWT",
+        "sub": false,
+        "icon": "https://images.tuyaeu.com/smart/icon/bay16570761439434Ehc/59407147520c567319236ce80b4181c7.jpg",
+        "mapping": {
+            "1": {
+                "code": "switch",
+                "type": "Boolean",
+                "values": {}
+            },
+            "9": {
+                "code": "countdown_1",
+                "type": "Integer",
+                "values": {
+                    "unit": "s",
+                    "min": 0,
+                    "max": 86400,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "17": {
+                "code": "add_ele",
+                "type": "Integer",
+                "values": {
+                    "unit": "",
+                    "min": 0,
+                    "max": 9999999,
+                    "scale": 3,
+                    "step": 100
+                }
+            },
+            "18": {
+                "code": "cur_current",
+                "type": "Integer",
+                "values": {
+                    "unit": "mA",
+                    "min": 0,
+                    "max": 100000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "19": {
+                "code": "cur_power",
+                "type": "Integer",
+                "values": {
+                    "unit": "W",
+                    "min": 0,
+                    "max": 999999,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "20": {
+                "code": "cur_voltage",
+                "type": "Integer",
+                "values": {
+                    "unit": "V",
+                    "min": 0,
+                    "max": 5000,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "21": {
+                "code": "test_bit",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 5,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "22": {
+                "code": "voltage_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "23": {
+                "code": "electric_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "24": {
+                "code": "power_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "25": {
+                "code": "electricity_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "26": {
+                "code": "fault",
+                "type": "Bitmap",
+                "values": {
+                    "label": [
+                        "ov_cr",
+                        "ov_vol",
+                        "ov_pwr",
+                        "ls_cr",
+                        "ls_vol",
+                        "ls_pow"
+                    ]
+                }
+            },
+            "38": {
+                "code": "relay_status",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "power_off",
+                        "power_on",
+                        "last"
+                    ]
+                }
+            },
+            "40": {
+                "code": "light_mode",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "relay",
+                        "pos",
+                        "none",
+                        "on"
+                    ]
+                }
+            },
+            "41": {
+                "code": "child_lock",
+                "type": "Boolean",
+                "values": {}
+            },
+            "42": {
+                "code": "cycle_time",
+                "type": "String",
+                "values": "{\"maxlen\":255}"
+            },
+            "47": {
+                "code": "temp_value",
+                "type": "Integer",
+                "values": {
+                    "unit": "\u00b0C",
+                    "min": 0,
+                    "max": 999,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "48": {
+                "code": "alarm_set_1",
+                "type": "Raw",
+                "values": {}
+            },
+            "49": {
+                "code": "alarm_set_2",
+                "type": "Raw",
+                "values": {}
+            },
+            "66": {
+                "code": "online_state",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "online",
+                        "offline"
+                    ]
+                }
+            }
+        },
+        "ip": "192.168.8.28",
+        "version": "3.5"
+    },
+    {
+        "name": "Co2 Meter",
+        "id": "bf00b61720d1979fc25jss",
+        "key": "~99Yv1m9_kXd4Z2&",
+        "mac": "d8:c8:0c:f0:ef:b6",
+        "uuid": "55b04db4b8cffe5f",
+        "sn": "100193325003B7",
+        "category": "co2bj",
+        "product_name": "CO2",
+        "product_id": "nqn4erultrywdshj",
+        "biz_type": 18,
+        "model": "RSH-",
+        "sub": false,
+        "icon": "https://images.tuyaeu.com/smart/icon/ay1511250453937mDBJE/22246830a4319f4ed0bb8af9dd0f1b31.png",
+        "mapping": {
+            "1": {
+                "code": "co2_state",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "alarm",
+                        "normal"
+                    ]
+                }
+            },
+            "2": {
+                "code": "co2_value",
+                "type": "Integer",
+                "values": {
+                    "unit": "ppm",
+                    "min": 0,
+                    "max": 5000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "8": {
+                "code": "self_checking",
+                "type": "Boolean",
+                "values": {}
+            },
+            "10": {
+                "code": "preheat",
+                "type": "Boolean",
+                "values": {}
+            },
+            "13": {
+                "code": "alarm_switch",
+                "type": "Boolean",
+                "values": {}
+            },
+            "18": {
+                "code": "temp_current",
+                "type": "Integer",
+                "values": {
+                    "unit": "\u00b0C",
+                    "min": -400,
+                    "max": 2000,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "19": {
+                "code": "humidity_value",
+                "type": "Integer",
+                "values": {
+                    "unit": "%",
+                    "min": 0,
+                    "max": 1000,
+                    "scale": 1,
+                    "step": 1
+                }
+            }
+        },
+        "ip": "192.168.8.27",
+        "version": "3.4"
+    },
+    {
+        "name": "WiFi \u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b\u044c SY2 \u0441 \u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435\u043c \u044d\u043d\u0435\u0440\u0433\u043e\u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u044f 2",
+        "id": "bfbc598d8717144230hsj1",
+        "key": "rX.B}6i{:Ns~nk17",
+        "mac": "3c:0b:59:b8:5b:81",
+        "uuid": "1c51efb7b668d009",
+        "sn": "1001993630982C",
+        "category": "dlq",
+        "product_name": "SY2 WiFi switch with metering ",
+        "product_id": "3lbgj7cu27nsmh0w",
+        "biz_type": 18,
+        "model": "TO-Q-SY2-JWT",
+        "sub": false,
+        "icon": "https://images.tuyaeu.com/smart/icon/bay16570761439434Ehc/59407147520c567319236ce80b4181c7.jpg",
+        "mapping": {
+            "1": {
+                "code": "switch",
+                "type": "Boolean",
+                "values": {}
+            },
+            "9": {
+                "code": "countdown_1",
+                "type": "Integer",
+                "values": {
+                    "unit": "s",
+                    "min": 0,
+                    "max": 86400,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "17": {
+                "code": "add_ele",
+                "type": "Integer",
+                "values": {
+                    "unit": "",
+                    "min": 0,
+                    "max": 9999999,
+                    "scale": 3,
+                    "step": 100
+                }
+            },
+            "18": {
+                "code": "cur_current",
+                "type": "Integer",
+                "values": {
+                    "unit": "mA",
+                    "min": 0,
+                    "max": 100000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "19": {
+                "code": "cur_power",
+                "type": "Integer",
+                "values": {
+                    "unit": "W",
+                    "min": 0,
+                    "max": 999999,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "20": {
+                "code": "cur_voltage",
+                "type": "Integer",
+                "values": {
+                    "unit": "V",
+                    "min": 0,
+                    "max": 5000,
+                    "scale": 1,
+                    "step": 1
+                }
+            },
+            "21": {
+                "code": "test_bit",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 5,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "22": {
+                "code": "voltage_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "23": {
+                "code": "electric_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "24": {
+                "code": "power_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "25": {
+                "code": "electricity_coe",
+                "type": "Integer",
+                "values": {
+                    "min": 0,
+                    "max": 1000000,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "26": {
+                "code": "fault",
+                "type": "Bitmap",
+                "values": {
+                    "label": [
+                        "ov_cr",
+                        "ov_vol",
+                        "ov_pwr",
+                        "ls_cr",
+                        "ls_vol",
+                        "ls_pow"
+                    ]
+                }
+            },
+            "38": {
+                "code": "relay_status",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "power_off",
+                        "power_on",
+                        "last"
+                    ]
+                }
+            },
+            "40": {
+                "code": "light_mode",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "relay",
+                        "pos",
+                        "none",
+                        "on"
+                    ]
+                }
+            },
+            "41": {
+                "code": "child_lock",
+                "type": "Boolean",
+                "values": {}
+            },
+            "42": {
+                "code": "cycle_time",
+                "type": "String",
+                "values": "{\"maxlen\":255}"
+            },
+            "47": {
+                "code": "temp_value",
+                "type": "Integer",
+                "values": {
+                    "unit": "\u00b0C",
+                    "min": 0,
+                    "max": 999,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "48": {
+                "code": "alarm_set_1",
+                "type": "Raw",
+                "values": {}
+            },
+            "49": {
+                "code": "alarm_set_2",
+                "type": "Raw",
+                "values": {}
+            },
+            "66": {
+                "code": "online_state",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "online",
+                        "offline"
+                    ]
+                }
+            }
+        },
+        "ip": "192.168.8.26",
         "version": "3.5"
     }
 ]

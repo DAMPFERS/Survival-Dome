@@ -22,8 +22,8 @@ class InverterSnapshot:
     """Атомарный снимок всех показаний инвертора.
     Возвращается геттерами под Lock, чтобы избежать рассинхрона между полями.
     """
-    consumed_power_kw: Optional[float]      # нагрузка, кВт
-    generated_power_kw: Optional[float]     # PV-генерация, кВт
+    consumed_power_kw: Optional[float]      # нагрузка, Вт
+    generated_power_kw: Optional[float]     # PV-генерация, Вт
     battery_soc_percent: Optional[float]    # SOC батареи, %
     battery_voltage_v: Optional[float]      # напряжение АКБ, В (для отладки)
     is_online: bool                         # флаг связи с инвертором
@@ -180,6 +180,12 @@ class InverterMonitor:
             except Exception as e:
                 logger.debug(f"Ошибка закрытия клиента: {e}")
             self._client = None
+    
+    def _to_signed(self, value: int):
+        """Преобразует 16-битное беззнаковое значение в знаковое (int16)."""
+        if value > 32767:
+            return value - 65536
+        return value
 
     
     # ------------------------------------------------------------------
@@ -222,8 +228,10 @@ class InverterMonitor:
             p_load_w = resp_inv.registers[10]             # W, без множителя
 
             battery_voltage_v = battery_voltage_raw * 0.1
-            consumed_kw = p_load_w / 1000.0
-            generated_kw = charger_power_w / 1000.0
+            
+            
+            consumed_kw = self._to_signed(p_load_w) / 1.0
+            generated_kw = self._to_signed(charger_power_w) / 1.0
 
             # Линейная оценка SOC: U / Umax * 100, с ограничением [0; 100]
             soc_percent = max(0.0, min(100.0,
@@ -403,23 +411,23 @@ class InverterMonitor:
     # Потокобезопасные геттеры
     # ------------------------------------------------------------------
     def get_consumed_power_kw(self) -> Optional[float]:
-        """Возвращает потребляемую мощность (нагрузка), кВт.
+        """Возвращает потребляемую мощность (нагрузка), Вт.
         
         Returns
         -------
         float | None
-            Мощность в кВт или None, если данные ещё не получены.
+            Мощность в Вт или None, если данные ещё не получены.
         """
         with self._data_lock:
             return self._consumed_power_kw
 
     def get_generated_power_kw(self) -> Optional[float]:
-        """Возвращает генерируемую мощность (от PV-панелей), кВт.
+        """Возвращает генерируемую мощность (от PV-панелей), Вт.
         
         Returns
         -------
         float | None
-            Мощность в кВт или None, если данные ещё не получены.
+            Мощность в Вт или None, если данные ещё не получены.
         """
         with self._data_lock:
             return self._generated_power_kw
@@ -469,8 +477,8 @@ class InverterMonitor:
         -------
         InverterSnapshot
             Датакласс с полями:
-            - consumed_power_kw: потребляемая мощность, кВт
-            - generated_power_kw: генерируемая мощность, кВт
+            - consumed_power_kw: потребляемая мощность, Вт
+            - generated_power_kw: генерируемая мощность, Вт
             - battery_soc_percent: SOC батареи, %
             - battery_voltage_v: напряжение батареи, В
             - is_online: флаг связи с инвертором
@@ -541,8 +549,8 @@ if __name__ == "__main__":
                 
                 if snapshot.is_online:
                     print(
-                        f"P_load={snapshot.consumed_power_kw:6.2f} кВт | "
-                        f"P_pv={snapshot.generated_power_kw:6.2f} кВт | "
+                        f"P_load={snapshot.consumed_power_kw:6.2f} Вт | "
+                        f"P_pv={snapshot.generated_power_kw:6.2f} Вт | "
                         f"U_batt={snapshot.battery_voltage_v:5.1f} В | "
                         f"SOC={snapshot.battery_soc_percent:5.1f}%"
                     )
