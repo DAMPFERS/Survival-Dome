@@ -234,18 +234,45 @@ class TongouSwitchManager:
 
 # ==================== ПРИМЕР ИСПОЛЬЗОВАНИЯ ====================
 
+
+
+
+
+L1_CONFIG = SwitchConfig("L1", "bf8c7f04c16e60cf708gns", "_#z.Gi|+[bi-EkLr", "192.168.8.29")
+L2_CONFIG = SwitchConfig("L2", "bf1812bfb2d18ce9ddkvsn", "YZ9WKV;+4/7Vzw|'", "192.168.8.30")
+L3_CONFIG = SwitchConfig("L3", "bf9322c1705a091c5absxh", "v-<`pWjK1D/.P36Z", "192.168.8.31")
+L4_CONFIG = SwitchConfig("L4", "bf191de6c5e2f9b8afyyrk", "r21}Sf*cykbd^MI<", "192.168.8.32")
+L5_CONFIG = SwitchConfig("L5", "bfbc598d8717144230hsj1", "rX.B}6i{:Ns~nk17", "192.168.8.26")
+L6_CONFIG = SwitchConfig("L6", "bfac2e9d88c981d76e9k2x", "Ao]ULnbA]CnHKuG#", "192.168.8.28")
+L7_CONFIG = SwitchConfig("L7", "bf7f8a04d3d6ea04f2nwhq", "yS1o`:e3Po*9[SS+", "192.168.8.33")
+L8_CONFIG = SwitchConfig("L8", "bfb1c8ae96a0f61b84fphs", "ESr2pzGG<@~]=w4h", "192.168.8.34")
+
 if __name__ == "__main__":
     # Пример конфигурации 8 выключателей
+    
+    
+    # configs = [
+    #     SwitchConfig("L1", "device_id_1", "local_key_1", "192.168.1.101"),
+    #     SwitchConfig("L2", "device_id_2", "local_key_2", "192.168.1.102"),
+    #     SwitchConfig("L3", "device_id_3", "local_key_3", "192.168.1.103"),
+    #     SwitchConfig("L4", "device_id_4", "local_key_4", "192.168.1.104"),
+    #     SwitchConfig("L5", "device_id_5", "local_key_5", "192.168.1.105"),
+    #     SwitchConfig("L6", "device_id_6", "local_key_6", "192.168.1.106"),
+    #     SwitchConfig("L7", "device_id_7", "local_key_7", "192.168.1.107"),
+    #     SwitchConfig("L8", "device_id_8", "local_key_8", "192.168.1.108"),
+    # ]
+    
     configs = [
-        SwitchConfig("L1", "device_id_1", "local_key_1", "192.168.1.101"),
-        SwitchConfig("L2", "device_id_2", "local_key_2", "192.168.1.102"),
-        SwitchConfig("L3", "device_id_3", "local_key_3", "192.168.1.103"),
-        SwitchConfig("L4", "device_id_4", "local_key_4", "192.168.1.104"),
-        SwitchConfig("L5", "device_id_5", "local_key_5", "192.168.1.105"),
-        SwitchConfig("L6", "device_id_6", "local_key_6", "192.168.1.106"),
-        SwitchConfig("L7", "device_id_7", "local_key_7", "192.168.1.107"),
-        SwitchConfig("L8", "device_id_8", "local_key_8", "192.168.1.108"),
+            L1_CONFIG,
+            L2_CONFIG,
+            L3_CONFIG,
+            L4_CONFIG,
+            L5_CONFIG,
+            L6_CONFIG,
+            L7_CONFIG,
+            L8_CONFIG,
     ]
+    
     
     # Создание менеджера (опрос каждые 5 секунд)
     manager = TongouSwitchManager(configs, poll_interval=5.0)
@@ -264,8 +291,8 @@ if __name__ == "__main__":
         
         # Управление
         manager.turn_on('L1')
-        time.sleep(1)
-        manager.turn_off('L1')
+        time.sleep(3)
+        # manager.turn_off('L6')
         
         # Получение всех состояний
         print("\nВсе состояния:")

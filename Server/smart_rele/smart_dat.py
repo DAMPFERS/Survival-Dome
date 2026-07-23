@@ -23,8 +23,8 @@ class Co2Meter:
     def __init__(self):
         # ДАННЫЕ ИЗ devices.json (пробелы в конце удалены для корректной работы tinytuya)
         self.device_id = "bf00b61720d1979fc25jss"
-        self.local_key = "k2X#2<EQ]j@n{/=c"
-        self.ip_address = "192.168.0.189"
+        self.local_key = "~99Yv1m9_kXd4Z2&"
+        self.ip_address = "192.168.8.27"
         self.device: Optional[tinytuya.OutletDevice] = None
 
     def connect(self) -> bool:
@@ -67,10 +67,10 @@ class Co2Meter:
                 temp_c = dps.get('18', 0) / 10.0
                 humidity_pct = dps.get('19', 0) / 10.0
                 
-                logger.info("🌡️ Данные с датчиков:")
-                logger.info(f"   💨 CO2: {co2_ppm} ppm")
-                logger.info(f"   🌡️ Температура: {temp_c:.1f} °C")
-                logger.info(f"   💧 Влажность: {humidity_pct:.1f} %")
+                logger.info(" Данные с датчиков:")
+                logger.info(f"    CO2: {co2_ppm} ppm")
+                logger.info(f"    Температура: {temp_c:.1f} °C")
+                logger.info(f"    Влажность: {humidity_pct:.1f} %")
                 
                 return {
                     "co2": co2_ppm,
