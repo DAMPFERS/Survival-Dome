@@ -136,3 +136,6 @@ LLM_PROVIDER=deepseek   # или mistral
 - Модерация/фильтр на выходе модели, если нужен дополнительный уровень
   защиты от нежелательных ответов.
 - Логирование в текстовый файл/экспорт для разбора игры после сессии.
+
+
+curl.exe -H "Content-Type: application/json" -H "Authorization: Bearer 6I6tGOMjkxZbFSyVAROI5CcwRzjE5wfd" -d "{\"model\":\"mistral-small-latest\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}" https://api.mistral.ai/v1/chat/completions
