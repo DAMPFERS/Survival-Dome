@@ -1,0 +1,61 @@
+{
+  "components": [
+    {
+      "ref": "R1",
+      "type": "resistor",
+      "value": "47k"
+    },
+    {
+      "ref": "R2",
+      "type": "resistor",
+      "value": "10k"
+    },
+    {
+      "ref": "J1",
+      "type": "connector2",
+      "value": "VIN"
+    },
+    {
+      "ref": "J2",
+      "type": "connector2",
+      "value": "VOUT"
+    },
+    {
+      "ref": "GND1",
+      "type": "gnd",
+      "value": "GND"
+    },
+    {
+      "ref": "P1",
+      "type": "power_flag",
+      "value": "+12V"
+    }
+  ],
+  "nets": [
+    {
+      "name": "+12V",
+      "pins": [
+        "J1.1",
+        "R1.1",
+        "P1.PWR"
+      ]
+    },
+    {
+      "name": "VOUT",
+      "pins": [
+        "R1.2",
+        "R2.1",
+        "J2.1"
+      ]
+    },
+    {
+      "name": "GND",
+      "pins": [
+        "J1.2",
+        "R2.2",
+        "J2.2",
+        "GND1.GND"
+      ]
+    }
+  ]
+}
