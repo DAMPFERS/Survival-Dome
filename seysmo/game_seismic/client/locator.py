@@ -43,16 +43,9 @@ class HypocenterLocator:
         self.vp = vp
     
     def locate(self, p_arrivals: Dict[str, float], 
-               sensor_positions: Dict[str, Tuple[float, float, float]]) -> Optional[HypocenterSolution]:
+           sensor_positions: Dict[str, Tuple[float, float, float]]) -> Optional[HypocenterSolution]:
         """
         Определяет гипоцентр по временам прихода P-волн.
-        
-        Args:
-            p_arrivals: dict sensor_id -> p_wave_time (сек)
-            sensor_positions: dict sensor_id -> (x, y, z) координаты датчика (км)
-        
-        Returns:
-            HypocenterSolution: результат локации, или None если недостаточно данных
         """
         if len(p_arrivals) < 3:
             print(f"[Locator] Недостаточно данных: {len(p_arrivals)} датчиков (нужно минимум 3)")
@@ -90,9 +83,16 @@ class HypocenterLocator:
             # Невязки
             return arrival_times - theoretical_times
         
-        # Решаем задачу наименьших квадратов
+        # ✅ ИСПРАВЛЕНИЕ: используем метод 'trf' (Trust Region Reflective)
+        # Он работает даже когда количество наблюдений < количества параметров
         try:
-            result = least_squares(residuals, initial_guess, method='lm')
+            result = least_squares(
+                residuals, 
+                initial_guess, 
+                method='trf',  # ✅ изменили с 'lm' на 'trf'
+                bounds=([-np.inf, -np.inf, 0.0, -np.inf],  # нижние границы (z >= 0)
+                        [np.inf, np.inf, np.inf, np.inf])   # верхние границы
+            )
             
             if not result.success:
                 print(f"[Locator] Оптимизация не сошлась: {result.message}")
@@ -100,9 +100,6 @@ class HypocenterLocator:
             
             x, y, z, t_origin = result.x
             residual_rms = np.sqrt(np.mean(result.fun ** 2))
-            
-            # Ограничиваем глубину (не может быть отрицательной)
-            z = max(z, 0.0)
             
             return HypocenterSolution(
                 x=x,
@@ -115,6 +112,8 @@ class HypocenterLocator:
             
         except Exception as e:
             print(f"[Locator] Ошибка оптимизации: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def estimate_magnitude(self, hypocenter: HypocenterSolution,

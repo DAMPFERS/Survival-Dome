@@ -218,7 +218,7 @@ class SeismicClientWidget(QWidget):
         
         # Маркер эпицентра (будет обновляться)
         self._epicenter_marker = self.map_plot.plot(
-            [], [], pen=None, symbol='*', symbolSize=20, symbolBrush='#ff4444'
+            [], [], pen=None, symbol='+', symbolSize=20, symbolBrush='#ff4444'
         )
         self._epicenter_label = pg.TextItem("", color='#ff4444', anchor=(0, 1))
         self.map_plot.addItem(self._epicenter_label)
@@ -269,11 +269,6 @@ class SeismicClientWidget(QWidget):
     # ------------------------------------------------------------------ #
     
     def _on_chunk_received(self, chunk: dict):
-        """
-        Слот: получает чанк от TCP-клиента.
-        
-        chunk: {'sensor_id': str, 'timestamp': float, 'Z': np.ndarray, 'N': np.ndarray, 'E': np.ndarray}
-        """
         sensor_id = chunk['sensor_id']
         timestamp = chunk['timestamp']
         z = chunk['Z']
@@ -286,8 +281,8 @@ class SeismicClientWidget(QWidget):
         buf.append('N', np.arange(len(n)) / 100.0 + timestamp, n)
         buf.append('E', np.arange(len(e)) / 100.0 + timestamp, e)
         
-        # Обрабатываем через детектор
-        detection = self.detector.process_chunk(sensor_id, timestamp, z, n, e)
+        # ✅ Передаём chunk_length в детектор
+        detection = self.detector.process_chunk(sensor_id, timestamp, z, n, e, chunk_length=len(z))
         
         if detection is not None:
             self._on_event_detected(detection)
@@ -295,10 +290,14 @@ class SeismicClientWidget(QWidget):
     def _on_event_detected(self, detection: EventDetection):
         """
         Слот: детектор обнаружил событие на одном датчике.
-        
-        Добавляем маркеры P/S, собираем данные для локации.
         """
         sensor_id = detection.sensor_id
+        
+        print(f"\n[Client] Event detected on {sensor_id}:")
+        print(f"  Trigger time: {detection.trigger_time:.2f}s")
+        print(f"  P-wave time: {detection.p_wave_time}")
+        print(f"  S-wave time: {detection.s_wave_time}")
+        print(f"  PGA: {detection.pga:.6f} m/s²")
         
         # Добавляем маркеры P и S на график
         plot = self.plots[sensor_id]
@@ -312,6 +311,7 @@ class SeismicClientWidget(QWidget):
             plot.addItem(p_line)
             self._markers[sensor_id].append((p_line, detection.p_wave_time))
             self._p_arrivals[sensor_id] = detection.p_wave_time
+            print(f"  Added P marker at {detection.p_wave_time:.2f}s")
         
         if detection.s_wave_time is not None:
             s_line = pg.InfiniteLine(
@@ -321,12 +321,17 @@ class SeismicClientWidget(QWidget):
             )
             plot.addItem(s_line)
             self._markers[sensor_id].append((s_line, detection.s_wave_time))
+            print(f"  Added S marker at {detection.s_wave_time:.2f}s")
         
         # Сохраняем PGA для оценки магнитуды
         self._pga_by_sensor[sensor_id] = detection.pga
         
         # Пытаемся определить гипоцентр, если достаточно данных
         if len(self._p_arrivals) >= 3:
+            print(f"\n[Client] Attempting hypocenter location with {len(self._p_arrivals)} sensors:")
+            for sid, t_p in self._p_arrivals.items():
+                print(f"  {sid}: P-arrival at {t_p:.2f}s")
+            
             hypocenter = self.locator.locate(self._p_arrivals, self.sensor_positions)
             
             if hypocenter is not None:
@@ -338,6 +343,17 @@ class SeismicClientWidget(QWidget):
                 self._last_hypocenter = hypocenter
                 self._update_map(hypocenter)
                 self._update_info(hypocenter)
+                
+                print(f"\n[Client] Hypocenter located:")
+                print(f"  Position: ({hypocenter.x:.2f}, {hypocenter.y:.2f}) km")
+                print(f"  Depth: {hypocenter.depth:.2f} km")
+                print(f"  Origin time: {hypocenter.origin_time:.2f} s")
+                print(f"  Magnitude: M{hypocenter.magnitude:.2f}")
+                print(f"  Residual: {hypocenter.residual:.4f} s")
+            else:
+                print(f"[Client] Failed to locate hypocenter")
+        
+    
     
     def _on_connection_status(self, status: str):
         """Слот: статус подключения TCP."""
