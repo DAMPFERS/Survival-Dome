@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Купол — общий интерфейс мультиагентного чата</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<!--
+====================================================================
+ФАЙЛ: index.html
+====================================================================
+
+Этот файл содержит только структуру интерфейса.
+
+Он подключает:
+- styles.css — внешний вид;
+- app.js — сценарий, таймер, чат и синхронное обновление параметров.
+
+Основная структура:
+1. header — верхняя панель;
+2. main.stage — рабочая область;
+3. section.chat-panel — чат ИИ-агентов;
+4. aside.telemetry-panel — параметры купола.
+====================================================================
+-->
+
+<div class="app">
+<!-- Верхняя панель: название проекта и управление сценарием -->
+<header class="header">
+ <div class="logo">
+   <div class="mark"><svg viewBox="0 0 24 24"><path d="M3 18h18M5 18a7 7 0 0 1 14 0M8 18a4 4 0 0 1 8 0M12 4v4M5.6 6.6l2.8 2.8M18.4 6.6l-2.8 2.8"/></svg></div>
+   <div><h1>Купол · операционная среда ИИ-агентов</h1><p>Общий интерфейс: диалог слева, синхронное состояние системы справа</p></div>
+ </div>
+ <div class="controls">
+   <button id="play" class="primary">▶ Запустить</button>
+   <button id="pause">Ⅱ Пауза</button>
+   <button id="reset">↺ Сначала</button>
+   <select id="speed"><option value="1">×1</option><option value="2">×2</option><option value="5" selected>×5</option><option value="10">×10</option><option value="20">×20</option></select>
+ </div>
+</header>
+<!--
+Главная рабочая область.
+
+На широком экране:
+- слева находится чат;
+- справа находятся карточки параметров.
+
+На узком экране блоки располагаются друг под другом.
+-->
+<main class="stage">
+ <!-- Левая панель: сообщения мультиагентной системы -->
+<section class="chat-panel">
+   <div class="panel-head"><h2>Мультиагентный чат</h2><div class="live"><i></i><span id="status">готов к запуску</span></div></div>
+   <div class="chat" id="chat"></div>
+   <button class="jump" id="jump">↓ К новым сообщениям</button>
+   <div class="timeline"><span id="clock">00:00</span><div class="track"><div id="track"></div></div><span>10:00</span></div>
+ </section>
+ <!-- Правая панель: синхронные параметры купола -->
+<aside class="telemetry-panel">
+   <div class="panel-head"><h2>Состояние купола</h2><div class="live"><i></i><span>синхронно с чатом</span></div></div>
+   <div class="cards" id="cards"></div>
+ </aside>
+</main>
+</div>
+<script src="app.js" defer></script>
+</body></html>

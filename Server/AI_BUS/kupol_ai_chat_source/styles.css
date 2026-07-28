@@ -1,0 +1,149 @@
+/*
+====================================================================
+ФАЙЛ: styles.css
+====================================================================
+
+Этот файл управляет только внешним видом интерфейса.
+
+Разделы:
+1. Цветовая схема.
+2. Базовые стили.
+3. Сетка приложения.
+4. Верхняя панель.
+5. Панель чата.
+6. Типы сообщений.
+7. Панель параметров.
+8. Анимации.
+9. Адаптивность.
+====================================================================
+*/
+
+/*
+--------------------------------------------------------------------
+1. ЦВЕТОВАЯ СХЕМА
+--------------------------------------------------------------------
+Все основные цвета вынесены в CSS-переменные.
+Меняя значения ниже, можно быстро изменить оформление всего сайта.
+*/
+:root{
+ --bg:#050b12;--panel:#0a1420;--panel2:#0d1a29;--line:#203247;--text:#eef6ff;--muted:#7890a8;
+ --cyan:#3bd4ff;--green:#3ee0a0;--amber:#ffc857;--red:#ff5d73;--violet:#a58bff;--shadow:0 14px 40px rgba(0,0,0,.32)
+}
+/*
+--------------------------------------------------------------------
+2. БАЗОВЫЙ СБРОС
+--------------------------------------------------------------------
+box-sizing: border-box включает границы и внутренние отступы
+в итоговую ширину и высоту элемента.
+*/
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
+body{overflow:hidden}button,select{font:inherit}
+/*
+--------------------------------------------------------------------
+3. ГЛАВНАЯ СЕТКА ПРИЛОЖЕНИЯ
+--------------------------------------------------------------------
+Приложение занимает всю высоту окна.
+Первая строка — шапка.
+Вторая строка — рабочая область.
+*/
+.app{height:100vh;display:grid;grid-template-rows:74px minmax(0,1fr);overflow:hidden}
+/*
+--------------------------------------------------------------------
+4. ВЕРХНЯЯ ПАНЕЛЬ
+--------------------------------------------------------------------
+Содержит логотип, название, кнопки и выбор скорости.
+*/
+.header{display:flex;justify-content:space-between;align-items:center;padding:0 22px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#0b1623,#07101a)}
+.logo{display:flex;gap:13px;align-items:center}.mark{width:42px;height:42px;border-radius:12px;border:1px solid #28516c;display:grid;place-items:center;background:radial-gradient(circle at 35% 30%,#1d6c92,#0b1b2a 65%);box-shadow:0 0 24px rgba(59,212,255,.16)}
+.mark svg{width:25px;fill:none;stroke:#8be8ff;stroke-width:1.5}.logo h1{font-size:17px;margin:0;letter-spacing:.08em;text-transform:uppercase}.logo p{margin:4px 0 0;color:var(--muted);font-size:12px}
+.controls{display:flex;align-items:center;gap:8px}button,select{border:1px solid #2b4057;background:#0e1c2c;color:var(--text);padding:9px 12px;border-radius:9px;font-weight:750;cursor:pointer}button.primary{background:#116a91;border-color:#2293bd}
+/*
+--------------------------------------------------------------------
+5. РАБОЧАЯ ОБЛАСТЬ
+--------------------------------------------------------------------
+Две колонки:
+- широкая колонка для чата;
+- более узкая колонка для параметров.
+*/
+.stage{min-height:0;display:grid;grid-template-columns:minmax(0,1.55fr) minmax(390px,.85fr);gap:12px;padding:12px;overflow:hidden}
+.chat-panel,/*
+--------------------------------------------------------------------
+9. ПАНЕЛЬ ТЕЛЕМЕТРИИ
+--------------------------------------------------------------------
+Содержит заголовок и сетку карточек параметров.
+*/
+.telemetry-panel{min-height:0;border:1px solid var(--line);background:linear-gradient(180deg,rgba(13,26,41,.98),rgba(7,15,25,.98));border-radius:16px;box-shadow:var(--shadow);overflow:hidden}
+.chat-panel{display:grid;grid-template-rows:56px minmax(0,1fr) 48px}
+.panel-head{display:flex;justify-content:space-between;align-items:center;padding:0 16px;border-bottom:1px solid var(--line)}
+.panel-head h2{font-size:14px;margin:0;text-transform:uppercase;letter-spacing:.08em}.live{display:flex;align-items:center;gap:7px;color:#96acc0;font-size:12px}.live i{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green)}
+/*
+--------------------------------------------------------------------
+6. ПРОКРУЧИВАЕМАЯ ОБЛАСТЬ ЧАТА
+--------------------------------------------------------------------
+overflow-y: auto включает ручной вертикальный скролл.
+overscroll-behavior не позволяет прокрутке переходить на всю страницу.
+*/
+.chat{min-height:0;overflow-y:auto;padding:14px 16px 50px;scrollbar-width:thin;scrollbar-color:#355b78 #09131e;overscroll-behavior:contain}
+.chat::-webkit-scrollbar{width:13px}.chat::-webkit-scrollbar-track{background:#09131e}.chat::-webkit-scrollbar-thumb{background:#355b78;border-radius:999px;border:3px solid #09131e}
+/*
+--------------------------------------------------------------------
+7. ОДНО СООБЩЕНИЕ
+--------------------------------------------------------------------
+Сообщение состоит из:
+- времени слева;
+- текстового блока справа.
+*/
+.msg{display:grid;grid-template-columns:56px minmax(0,1fr);gap:10px;margin-bottom:11px;animation:rise .3s ease}@keyframes rise{from{opacity:0;transform:translateY(8px)}}
+.msg-time{font:11px ui-monospace,Consolas,monospace;color:#617a92;padding-top:7px}
+.bubble{padding:11px 13px;border-radius:12px;background:#0b1725;border:1px solid #1d3349}
+.meta{display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap}.tag{font-size:9px;font-weight:900;letter-spacing:.1em;padding:4px 6px;border-radius:5px;background:#17304a;color:#9edfff;text-transform:uppercase}.agent{font-size:13px;font-weight:850}.text{font-size:14px;line-height:1.46;color:#dbe8f4}
+/*
+--------------------------------------------------------------------
+8. ЦВЕТОВЫЕ ТИПЫ СООБЩЕНИЙ
+--------------------------------------------------------------------
+Тип задаётся атрибутом data-type из JavaScript.
+*/
+.msg[data-type="warning"] .bubble{border-color:#715b2a;background:#211c12}.msg[data-type="warning"] .tag{background:#7a5b1e;color:#fff0b8}
+.msg[data-type="danger"] .bubble{border-color:#7f3040;background:#24131a}.msg[data-type="danger"] .tag{background:#8d2e42;color:white}
+.msg[data-type="decision"] .bubble{border-color:#485f9d;background:#121a34}.msg[data-type="decision"] .tag{background:#405da7;color:white}
+.msg[data-type="result"] .bubble{border-color:#247151;background:#0d241b}.msg[data-type="result"] .tag{background:#227a58;color:white}
+.msg[data-type="system"] .bubble{border-style:dashed;color:#a7bbce}
+.timeline{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:0 16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+.track{height:5px;border-radius:99px;background:#13263a;overflow:hidden}.track>div{height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--violet));transition:width .18s linear}
+.telemetry-panel{display:grid;grid-template-rows:56px minmax(0,1fr)}.cards{min-height:0;overflow:auto;padding:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;align-content:start;scrollbar-width:thin}
+/*
+--------------------------------------------------------------------
+10. КАРТОЧКА ПАРАМЕТРА
+--------------------------------------------------------------------
+Каждая карточка отображает:
+- иконку;
+- название;
+- значение;
+- пояснение;
+- цветовой статус.
+*/
+.param{position:relative;min-height:130px;border:1px solid #1f3449;background:linear-gradient(145deg,#0d1b2a,#09131e);border-radius:14px;padding:13px;overflow:hidden;transition:.28s ease}
+.param::after{content:"";position:absolute;inset:auto -30px -50px auto;width:110px;height:110px;border-radius:50%;background:currentColor;opacity:.04;filter:blur(1px)}
+/*
+--------------------------------------------------------------------
+11. АНИМАЦИЯ ОБНОВЛЕНИЯ
+--------------------------------------------------------------------
+Класс changed временно добавляется из JavaScript,
+когда значение параметра изменилось.
+*/
+.param.changed{animation:pulse .55s ease}@keyframes pulse{0%{transform:scale(1)}45%{transform:scale(1.025);box-shadow:0 0 30px currentColor}100%{transform:scale(1)}}
+.param.ok{color:var(--green)}.param.warn{color:var(--amber)}.param.danger{color:var(--red)}.param.muted{color:#75889a}
+.param-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.icon{width:38px;height:38px;display:grid;place-items:center;border-radius:11px;background:currentColor}.icon svg{width:21px;height:21px;fill:none;stroke:#071018;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.param-label{color:#91a6ba;font-size:11px;text-transform:uppercase;letter-spacing:.08em;text-align:right}.value{font-size:25px;font-weight:950;margin-top:18px;letter-spacing:-.02em}.sub{font-size:12px;color:#8499ad;margin-top:3px}
+.meter{height:5px;border-radius:99px;background:#172738;margin-top:12px;overflow:hidden}.meter>div{height:100%;background:currentColor;width:65%;transition:width .4s ease}
+.footer-note{position:absolute;left:18px;bottom:13px;color:#4e667d;font:10px ui-monospace,Consolas,monospace}
+.jump{position:absolute;right:28px;bottom:68px;z-index:5;display:none;border-radius:99px;background:#153750;border-color:#357398}
+.chat-panel{position:relative}
+/*
+--------------------------------------------------------------------
+12. АДАПТИВНОСТЬ
+--------------------------------------------------------------------
+На планшетах чат и телеметрия располагаются друг под другом.
+*/
+@media(max-width:980px){body{overflow:auto}.app{height:auto;min-height:100vh}.stage{grid-template-columns:1fr;overflow:visible}.chat-panel{height:72vh}.telemetry-panel{height:auto}.cards{overflow:visible}}
+@media(max-width:580px){.header{height:auto;min-height:90px;align-items:flex-start;padding:13px;gap:10px;flex-direction:column}.app{grid-template-rows:auto auto}.controls{flex-wrap:wrap}.cards{grid-template-columns:1fr}.stage{padding:7px}}
