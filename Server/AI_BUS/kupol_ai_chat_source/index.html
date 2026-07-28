@@ -36,7 +36,6 @@
    <button id="play" class="primary">▶ Запустить</button>
    <button id="pause">Ⅱ Пауза</button>
    <button id="reset">↺ Сначала</button>
-   <select id="speed"><option value="1">×1</option><option value="2">×2</option><option value="5" selected>×5</option><option value="10">×10</option><option value="20">×20</option></select>
  </div>
 </header>
 <!--
@@ -54,7 +53,11 @@
    <div class="panel-head"><h2>Мультиагентный чат</h2><div class="live"><i></i><span id="status">готов к запуску</span></div></div>
    <div class="chat" id="chat"></div>
    <button class="jump" id="jump">↓ К новым сообщениям</button>
-   <div class="timeline"><span id="clock">00:00</span><div class="track"><div id="track"></div></div><span>10:00</span></div>
+   <form class="composer" id="composer">
+     <input id="operatorInput" type="text" placeholder="Сообщение оператора…" autocomplete="off">
+     <button type="submit">Отправить</button>
+   </form>
+   <div class="timeline"><span id="clock">00:00:00</span><div class="track"><div id="track"></div></div><span id="buffered"></span></div>
  </section>
  <!-- Правая панель: синхронные параметры купола -->
 <aside class="telemetry-panel">

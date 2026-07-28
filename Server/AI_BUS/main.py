@@ -26,7 +26,7 @@ from tool_registry import ToolExecutor
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_MODEL = "deepseek-v4-pro"   # модель DeepSeek с поддержкой function calling
+DEEPSEEK_MODEL = "deepseek-chat"   # модель DeepSeek с поддержкой function calling
 
 TELEMETRY_HOST = "192.168.8.36"
 TELEMETRY_PORT = 8765
@@ -50,7 +50,7 @@ def _operator_input_loop(orchestrator: Orchestrator) -> None:
     """Читает ввод из консоли в отдельном потоке и передаёт реплики оператора в чат."""
     while True:
         try:
-            text = input()
+            text = input("Оператор> ")
         except EOFError:
             break
         text = text.strip()

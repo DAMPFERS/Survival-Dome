@@ -185,7 +185,7 @@ def main() -> int:
         system = DomeSystem(
             model=args.model,
             # host=args.host,
-            host="192.168.8.36",
+            host="192.168.8.53",
             port=args.port,
             voice_enabled=not args.no_voice,
             tts_backend=args.tts_backend,

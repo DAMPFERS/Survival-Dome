@@ -73,7 +73,7 @@ body{overflow:hidden}button,select{font:inherit}
 Содержит заголовок и сетку карточек параметров.
 */
 .telemetry-panel{min-height:0;border:1px solid var(--line);background:linear-gradient(180deg,rgba(13,26,41,.98),rgba(7,15,25,.98));border-radius:16px;box-shadow:var(--shadow);overflow:hidden}
-.chat-panel{display:grid;grid-template-rows:56px minmax(0,1fr) 48px}
+.chat-panel{display:grid;grid-template-rows:56px minmax(0,1fr) 52px 48px}
 .panel-head{display:flex;justify-content:space-between;align-items:center;padding:0 16px;border-bottom:1px solid var(--line)}
 .panel-head h2{font-size:14px;margin:0;text-transform:uppercase;letter-spacing:.08em}.live{display:flex;align-items:center;gap:7px;color:#96acc0;font-size:12px}.live i{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green)}
 /*
@@ -108,7 +108,12 @@ overscroll-behavior не позволяет прокрутке переходи�
 .msg[data-type="decision"] .bubble{border-color:#485f9d;background:#121a34}.msg[data-type="decision"] .tag{background:#405da7;color:white}
 .msg[data-type="result"] .bubble{border-color:#247151;background:#0d241b}.msg[data-type="result"] .tag{background:#227a58;color:white}
 .msg[data-type="system"] .bubble{border-style:dashed;color:#a7bbce}
+.composer{display:flex;gap:8px;align-items:center;padding:0 16px;border-top:1px solid var(--line)}
+.composer input{flex:1;border:1px solid #2b4057;background:#0e1c2c;color:var(--text);padding:9px 12px;border-radius:9px}
+.composer input:focus{outline:none;border-color:var(--cyan)}
+.composer button{background:#116a91;border-color:#2293bd}
 .timeline{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:0 16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+#buffered{font:11px ui-monospace,Consolas,monospace}
 .track{height:5px;border-radius:99px;background:#13263a;overflow:hidden}.track>div{height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--violet));transition:width .18s linear}
 .telemetry-panel{display:grid;grid-template-rows:56px minmax(0,1fr)}.cards{min-height:0;overflow:auto;padding:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;align-content:start;scrollbar-width:thin}
 /*
