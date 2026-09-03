@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Админ-панель квеста</title>
+<style>
+  body { font-family: sans-serif; background: #f4f4f4; padding: 24px; }
+  h1 { font-size: 20px; }
+  .card { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  button { padding: 10px 16px; margin-right: 8px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
+  .stage-btn { background: #ddd; }
+  .stage-btn.active { background: #4a90d9; color: #fff; }
+  .danger { background: #d94a4a; color: #fff; }
+  #log { max-height: 400px; overflow-y: auto; font-family: monospace; font-size: 13px; }
+  .row { padding: 6px 0; border-bottom: 1px solid #eee; }
+  .role-user { color: #1a5; }
+  .role-assistant { color: #a51; }
+</style>
+</head>
+<body>
+<h1>Панель ведущего</h1>
+
+<div class="card">
+  <strong>Текущий этап:</strong> <span id="currentStage">-</span> / <span id="maxStage">-</span>
+  <div id="stageButtons" style="margin-top: 10px;"></div>
+</div>
+
+<div class="card">
+  <button class="danger" id="resetBtn">Сбросить сессию (новая команда)</button>
+  <span id="sessionId" style="margin-left: 12px; color: #777; font-size: 12px;"></span>
+</div>
+
+<div class="card">
+  <strong>Лог диалога</strong>
+  <div id="log"></div>
+</div>
+
+<script>
+let adminPassword = sessionStorage.getItem('admin_password') || prompt('Пароль администратора:') || '';
+sessionStorage.setItem('admin_password', adminPassword);
+
+function authHeaders(extra = {}) {
+  return { 'X-Admin-Password': adminPassword, ...extra };
+}
+
+async function refresh() {
+  const res = await fetch('/admin/state', { headers: authHeaders() });
+  if (res.status === 401) {
+    alert('Неверный пароль. Обновите страницу и попробуйте снова.');
+    sessionStorage.removeItem('admin_password');
+    return;
+  }
+  const data = await res.json();
+
+  document.getElementById('currentStage').textContent = data.stage;
+  document.getElementById('maxStage').textContent = data.max_stage;
+  document.getElementById('sessionId').textContent = 'session: ' + data.session_id;
+
+  const stageButtons = document.getElementById('stageButtons');
+  stageButtons.innerHTML = '';
+  for (let i = 1; i <= data.max_stage; i++) {
+    const b = document.createElement('button');
+    b.textContent = 'Этап ' + i;
+    b.className = 'stage-btn' + (i === data.stage ? ' active' : '');
+    b.onclick = () => setStage(i);
+    stageButtons.appendChild(b);
+  }
+
+  const log = document.getElementById('log');
+  log.innerHTML = '';
+  data.log.forEach(m => {
+    const div = document.createElement('div');
+    div.className = 'row';
+    const time = new Date(m.ts * 1000).toLocaleTimeString();
+    div.innerHTML = `<span style="color:#999">[${time}]</span> <span class="role-${m.role}">${m.role}:</span> ${m.content}`;
+    log.appendChild(div);
+  });
+  log.scrollTop = log.scrollHeight;
+}
+
+async function setStage(stage) {
+  await fetch('/admin/stage', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ stage })
+  });
+  refresh();
+}
+
+document.getElementById('resetBtn').addEventListener('click', async () => {
+  if (!confirm('Сбросить сессию для следующей команды? История текущей команды останется в логах.')) return;
+  await fetch('/admin/reset', { method: 'POST', headers: authHeaders() });
+  refresh();
+});
+
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>
