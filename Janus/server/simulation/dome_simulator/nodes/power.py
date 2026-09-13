@@ -38,11 +38,16 @@ class SolarInverter(BaseNode):
             "health": 1.0,           # 0..1, деградация панелей
             "elapsed_s": 0.0,        # внутренние "часы" узла
             "control_disabled": False,
+            "control_override_source": None,  # None | "real" | "virtual"
         }
 
     def tick(self, dt: float, state: StateStore, event_bus: EventBus) -> list[Event]:
         events: list[Event] = []
         node = state.get_node(self.node_id)
+
+        # Если источник данных - real, пропускаем виртуальную логику
+        if node.get("control_override_source") == "real":
+            return events
 
         if node["control_disabled"]:
             state.update(self.node_id, output_kw=0.0, irradiance=0.0)
@@ -115,11 +120,16 @@ class BatteryBank(BaseNode):
             "charge_pct": 0.8,
             "health": 1.0,
             "control_max_discharge_kw": 20.0,  # ограничение отдачи, можно менять снаружи
+            "control_override_source": None,  # None | "real" | "virtual"
         }
 
     def tick(self, dt: float, state: StateStore, event_bus: EventBus) -> list[Event]:
         events: list[Event] = []
         node = state.get_node(self.node_id)
+
+        # Если источник данных - real, пропускаем виртуальную логику (кроме саморазряда)
+        if node.get("control_override_source") == "real":
+            return events
 
         charge = node["charge_kwh"] - self.capacity_kwh * self.self_discharge_rate * dt
         charge = max(0.0, min(self.capacity_kwh, charge))
@@ -189,11 +199,16 @@ class PowerLine(BaseNode):
             "current_load_kw": 0.0,
             "status": "ok",             # "ok" | "tripped" | "disabled"
             "cooldown_remaining_s": 0.0,
+            "control_override_source": None,  # None | "real" | "virtual"
         }
 
     def tick(self, dt: float, state: StateStore, event_bus: EventBus) -> list[Event]:
         events: list[Event] = []
         node = state.get_node(self.node_id)
+
+        # Если источник данных - real, пропускаем виртуальную логику
+        if node.get("control_override_source") == "real":
+            return events
 
         if node["status"] == "tripped":
             remaining = max(0.0, node["cooldown_remaining_s"] - dt)

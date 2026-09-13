@@ -31,11 +31,16 @@ class ZoneClimate(BaseNode):
             "pressure_kpa": 101.3,
             "control_drift_multiplier": 1.0,  # растёт при поломке вентиляции — тревога
             "external_shock_c": 0.0,          # разовое возмущение от кризиса
+            "control_override_source": None,  # None | "real" | "virtual"
         }
 
     def tick(self, dt: float, state: StateStore, event_bus: EventBus) -> list[Event]:
         events: list[Event] = []
         node = state.get_node(self.node_id)
+
+        # Если источник данных - real, пропускаем виртуальную логику
+        if node.get("control_override_source") == "real":
+            return events
 
         drift = self.base_drift_rate * node["control_drift_multiplier"] * dt
         temp = node["temperature_c"] + (node["target_temp_c"] - node["temperature_c"]) * min(1.0, drift)
@@ -75,11 +80,16 @@ class CO2Sensor(BaseNode):
             "ppm": 450.0,
             "control_generation_multiplier": 1.0,  # растёт, если больше людей/станков
             "control_scrub_effect_ppm_s": 0.0,      # выставляет DependencyEngine из CO2Scrubber
+            "control_override_source": None,  # None | "real" | "virtual"
         }
 
     def tick(self, dt: float, state: StateStore, event_bus: EventBus) -> list[Event]:
         events: list[Event] = []
         node = state.get_node(self.node_id)
+
+        # Если источник данных - real, пропускаем виртуальную логику
+        if node.get("control_override_source") == "real":
+            return events
 
         gen = self.base_generation_ppm_s * node["control_generation_multiplier"] * dt
         scrub = node["control_scrub_effect_ppm_s"] * dt
@@ -155,10 +165,16 @@ class HumidityControl(BaseNode):
             "humidity_pct": self.target_humidity_pct,
             "target_humidity_pct": self.target_humidity_pct,
             "enabled": True,
+            "control_override_source": None,  # None | "real" | "virtual"
         }
 
     def tick(self, dt: float, state: StateStore, event_bus: EventBus) -> list[Event]:
         node = state.get_node(self.node_id)
+        
+        # Если источник данных - real, пропускаем виртуальную логику
+        if node.get("control_override_source") == "real":
+            return []
+        
         noise = random.uniform(-0.3, 0.3) * dt
         if node["enabled"]:
             hum = node["humidity_pct"] + (node["target_humidity_pct"] - node["humidity_pct"]) * 0.05 + noise

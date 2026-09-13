@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    ports:
+      - "8080:8080" # Открывает интерфейс чата для хоста и всей локальной сети
+    volumes:
+      - open-webui-data:/app/backend/data
+    environment:
+      # Указываем специальный DNS-адрес для связи контейнера с хостом
+      - OPENAI_API_BASE_URL=http://docker.internal
+      - OPENAI_API_KEY=3141fakekey
+      - ENABLE_OLLAMA=False
+    extra_hosts:
+      # Этот параметр обязателен для систем на Linux, чтобы host.docker.internal заработал
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  open-webui-data:

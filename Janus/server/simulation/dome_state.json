@@ -1,0 +1,246 @@
+{
+  "timestamp": 1789335688.1099544,
+  "nodes": {
+    "solar_1": {
+      "capacity_kw": 12.0,
+      "output_kw": 8.918,
+      "irradiance": 0.743,
+      "health": 1.0,
+      "elapsed_s": 64.0,
+      "control_disabled": false,
+      "control_override_source": null
+    },
+    "solar_2": {
+      "capacity_kw": 12.0,
+      "output_kw": 8.918,
+      "irradiance": 0.743,
+      "health": 1.0,
+      "elapsed_s": 64.0,
+      "control_disabled": false,
+      "control_override_source": null
+    },
+    "battery_1": {
+      "capacity_kwh": 60.0,
+      "charge_kwh": 46.026,
+      "charge_pct": 0.767,
+      "health": 1.0,
+      "control_max_discharge_kw": 20.0,
+      "control_override_source": null
+    },
+    "diesel_1": {
+      "max_output_kw": 15.0,
+      "output_kw": 0.0,
+      "fuel_l": 200.0,
+      "running": false,
+      "control_target_output_kw": 0.0
+    },
+    "line_1": {
+      "source": "battery_1",
+      "target": "consumer_1",
+      "max_capacity_kw": 8.0,
+      "current_load_kw": 0.0,
+      "status": "ok",
+      "cooldown_remaining_s": 0.0,
+      "control_override_source": null
+    },
+    "line_2": {
+      "source": "battery_1",
+      "target": "consumer_2",
+      "max_capacity_kw": 8.0,
+      "current_load_kw": 0.0,
+      "status": "ok",
+      "cooldown_remaining_s": 0.0,
+      "control_override_source": null
+    },
+    "line_3": {
+      "source": "battery_1",
+      "target": "consumer_3",
+      "max_capacity_kw": 8.0,
+      "current_load_kw": 0.0,
+      "status": "ok",
+      "cooldown_remaining_s": 0.0,
+      "control_override_source": null
+    },
+    "line_4": {
+      "source": "battery_1",
+      "target": "consumer_4",
+      "max_capacity_kw": 8.0,
+      "current_load_kw": 0.0,
+      "status": "ok",
+      "cooldown_remaining_s": 0.0,
+      "control_override_source": null
+    },
+    "line_5": {
+      "source": "battery_1",
+      "target": "consumer_5",
+      "max_capacity_kw": 8.0,
+      "current_load_kw": 0.0,
+      "status": "ok",
+      "cooldown_remaining_s": 0.0,
+      "control_override_source": null
+    },
+    "line_6": {
+      "source": "battery_1",
+      "target": "consumer_6",
+      "max_capacity_kw": 8.0,
+      "current_load_kw": 0.0,
+      "status": "ok",
+      "cooldown_remaining_s": 0.0,
+      "control_override_source": null
+    },
+    "line_7": {
+      "source": "battery_1",
+      "target": "consumer_7",
+      "max_capacity_kw": 8.0,
+      "current_load_kw": 0.0,
+      "status": "ok",
+      "cooldown_remaining_s": 0.0,
+      "control_override_source": null
+    },
+    "line_8": {
+      "source": "battery_1",
+      "target": "consumer_8",
+      "max_capacity_kw": 8.0,
+      "current_load_kw": 0.0,
+      "status": "ok",
+      "cooldown_remaining_s": 0.0,
+      "control_override_source": null
+    },
+    "consumer_residential": {
+      "base_demand_kw": 4.0,
+      "demand_kw": 4.299,
+      "actual_kw": 4.299,
+      "priority": 1,
+      "shed": false
+    },
+    "consumer_workshop": {
+      "base_demand_kw": 6.0,
+      "demand_kw": 5.22,
+      "actual_kw": 5.22,
+      "priority": 6,
+      "shed": false
+    },
+    "climate_residential": {
+      "zone_name": "residential",
+      "temperature_c": 21.0,
+      "target_temp_c": 21.0,
+      "pressure_kpa": 101.3,
+      "control_drift_multiplier": 1.0,
+      "external_shock_c": 0.0,
+      "control_override_source": null
+    },
+    "climate_workshop": {
+      "zone_name": "workshop",
+      "temperature_c": 21.0,
+      "target_temp_c": 21.0,
+      "pressure_kpa": 101.3,
+      "control_drift_multiplier": 1.0,
+      "external_shock_c": 0.0,
+      "control_override_source": null
+    },
+    "co2_sensor_1": {
+      "ppm": 430.8,
+      "control_generation_multiplier": 1.0,
+      "control_scrub_effect_ppm_s": 0.4,
+      "control_override_source": null
+    },
+    "co2_scrubber_1": {
+      "capacity_ppm_s": 0.4,
+      "power_draw_kw": 1.2,
+      "enabled": true,
+      "health": 1.0,
+      "control_powered": true,
+      "effect_ppm_s": 0.4
+    },
+    "humidity_1": {
+      "humidity_pct": 45.89,
+      "target_humidity_pct": 45.0,
+      "enabled": true,
+      "control_override_source": null
+    },
+    "ventilation_1": {
+      "airflow_m3_h": 500.0,
+      "running": true,
+      "health": 1.0
+    },
+    "air_filter_1": {
+      "clog_pct": 0.16,
+      "efficiency": 0.998
+    },
+    "water_tank_1": {
+      "capacity_l": 5000.0,
+      "level_l": 3498.48,
+      "control_inflow_l_s": 0.03
+    },
+    "water_recycling_1": {
+      "capacity_l_s": 0.03,
+      "power_draw_kw": 0.8,
+      "health": 1.0,
+      "control_powered": true,
+      "output_l_s": 0.03
+    },
+    "oxygen_gen_1": {
+      "o2_pct": 21.284,
+      "output_pct_s": 0.01,
+      "power_draw_kw": 1.5,
+      "control_powered": true,
+      "consumption_pct_s": 0.004
+    },
+    "waste_1": {
+      "capacity_kg": 500.0,
+      "level_kg": 0.64,
+      "processing": false
+    },
+    "cnc_1": {
+      "power_draw_kw": 2.5,
+      "status": "idle",
+      "job_name": null,
+      "job_remaining_s": 0.0,
+      "control_powered": true
+    },
+    "printer_1": {
+      "power_draw_kw": 0.6,
+      "status": "done",
+      "job_name": "bracket_v2",
+      "job_remaining_s": 0.0,
+      "control_powered": true
+    },
+    "solder_1": {
+      "power_draw_kw": 0.3,
+      "status": "idle",
+      "job_name": null,
+      "job_remaining_s": 0.0,
+      "control_powered": true
+    },
+    "workstation_1": {
+      "power_draw_kw": 0.4,
+      "status": "idle",
+      "job_name": null,
+      "job_remaining_s": 0.0,
+      "control_powered": true
+    },
+    "main_controller": {
+      "overall_status": "nominal",
+      "active_crisis_count": 0,
+      "last_update_s": 64.0
+    },
+    "emergency_lights_1": {
+      "active": true,
+      "battery_pct": 98.8
+    },
+    "fire_suppression_1": {
+      "armed": true,
+      "triggered": false,
+      "agent_pct": 100.0
+    },
+    "structure_1": {
+      "wear_pct": 0.0022,
+      "control_extra_wear_rate": 3e-05
+    },
+    "network_1": {
+      "online": true,
+      "latency_ms": 20.0,
+      "packet_loss_pct": 0.0
+    }
+  }
+}
