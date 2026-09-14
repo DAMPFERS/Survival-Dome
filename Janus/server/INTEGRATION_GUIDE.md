@@ -610,12 +610,4 @@ for (const nodeId of nodesToSwitch) {
 
 ---
 
-## Контакты и поддержка
 
-Проект: **Survival-Dome / Janus Server**  
-Версия: **1.0 (Integrated)**  
-Дата: **2026-09-14**
-
----
-
-**Happy coding!** 🚀

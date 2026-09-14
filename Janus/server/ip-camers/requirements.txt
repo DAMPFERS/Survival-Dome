@@ -1,0 +1,4 @@
+av>=12.0.0
+opencv-python-headless>=4.8.0   # или opencv-python если нужен GUI
+numpy>=1.24.0
+sounddevice>=0.4.6              # для аудио (рекомендуется)
