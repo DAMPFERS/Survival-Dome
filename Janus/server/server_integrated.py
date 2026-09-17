@@ -429,11 +429,18 @@ async def handle_client(websocket):
         
         # Отправляем текущее состояние сразу при подключении
         snapshot = simulator.snapshot()
+        
+        # print("=== SNAPSHOT KEYS ===")
+        # print(snapshot.keys() if isinstance(snapshot, dict) else type(snapshot))
+        # print("=== SNAPSHOT ===")
+        # import pprint
+        # pprint.pprint(snapshot)
+        
         telemetry_msg = {
             "type": "telemetry",
             "timestamp": snapshot["timestamp"],
             "data": {
-                "nodes": snapshot["state"],
+                "nodes": snapshot["nodes"],
                 "active_crises": simulator.active_crises(),
                 "sim_time": simulator.time_controller.sim_time,
                 "time_scale": simulator.time_controller.time_scale,
@@ -454,7 +461,7 @@ async def handle_client(websocket):
                 "type": "telemetry",
                 "timestamp": snapshot["timestamp"],
                 "data": {
-                    "nodes": snapshot["state"],
+                    "nodes": snapshot["nodes"],
                     "active_crises": simulator.active_crises(),
                     "sim_time": simulator.time_controller.sim_time,
                     "time_scale": simulator.time_controller.time_scale,

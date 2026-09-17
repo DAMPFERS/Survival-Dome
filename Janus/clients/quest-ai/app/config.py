@@ -35,5 +35,10 @@ class Settings:
     # --- Админ-панель ---
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "change_me_please")
 
+    # --- Dome Server Integration ---
+    DOME_SERVER_URL: str = os.getenv("DOME_SERVER_URL", "ws://localhost:8765")
+    DOME_RECONNECT_DELAY: int = int(os.getenv("DOME_RECONNECT_DELAY", "5"))
+    DOME_ENABLE_CONTROL: bool = os.getenv("DOME_ENABLE_CONTROL", "true").lower() == "true"
+
 
 settings = Settings()
