@@ -8,11 +8,14 @@ WebSocket клиент для подключения к серверу купо�
 - Автоматическое переподключение при потере связи
 - Thread-safe доступ к данным телеметрии
 """
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
-from typing import Any, Callable
+import os
 from datetime import datetime
+from typing import Any
 
 try:
     import websockets
@@ -21,7 +24,22 @@ except ImportError:
     # websockets уже в requirements.txt
     pass
 
-from app.config import settings
+# Совместимость: в приложении берём settings, при автономном запуске — дефолты
+try:
+    from app.config import settings
+
+    _DEFAULT_URL = settings.DOME_SERVER_URL
+    _DEFAULT_RECONNECT = settings.DOME_RECONNECT_DELAY
+    _DEFAULT_ENABLE_CONTROL = settings.DOME_ENABLE_CONTROL
+except Exception:
+    _DEFAULT_URL = os.getenv("DOME_SERVER_URL", "ws://localhost:8765")
+    _DEFAULT_RECONNECT = float(os.getenv("DOME_RECONNECT_DELAY", "3.0"))
+    _DEFAULT_ENABLE_CONTROL = os.getenv("DOME_ENABLE_CONTROL", "1") not in (
+        "0",
+        "false",
+        "False",
+        "",
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -32,30 +50,54 @@ class DomeClient:
     # Ключевые узлы для отображения на дашборде
     KEY_NODES = [
         # Энергетика
-        "solar_1", "battery_1", "diesel_1",
+        "solar_1",
+        "battery_1",
+        "diesel_1",
         # Линии передачи
-        "line_1", "line_2", "line_3", "line_4",
-        "line_5", "line_6", "line_7", "line_8",
+        "line_1",
+        "line_2",
+        "line_3",
+        "line_4",
+        "line_5",
+        "line_6",
+        "line_7",
+        "line_8",
         # Климат
-        "climate_residential", "co2_sensor_1",
+        "climate_residential",
+        "co2_sensor_1",
     ]
 
-    def __init__(self):
-        self.url = settings.DOME_SERVER_URL
-        self.reconnect_delay = settings.DOME_RECONNECT_DELAY
-        self.enable_control = settings.DOME_ENABLE_CONTROL
+    def __init__(
+        self,
+        url: str | None = None,
+        reconnect_delay: float | None = None,
+        enable_control: bool | None = None,
+        response_timeout: float = 10.0,
+    ):
+        self.url = url if url is not None else _DEFAULT_URL
+        self.reconnect_delay = (
+            reconnect_delay if reconnect_delay is not None else _DEFAULT_RECONNECT
+        )
+        self.enable_control = (
+            enable_control if enable_control is not None else _DEFAULT_ENABLE_CONTROL
+        )
 
         self._ws: WebSocketClientProtocol | None = None
         self._latest_telemetry: dict[str, Any] | None = None
         self._connected = False
         self._running = False
         self._lock = asyncio.Lock()
-        
-        # Для отслеживания ответов на команды
-        self._pending_responses: dict[str, asyncio.Future] = {}
-        self._response_timeout = 10.0  # секунд
+        self._telemetry_event = asyncio.Event()
 
-        logger.info(f"DomeClient initialized (URL: {self.url}, control: {self.enable_control})")
+        # Для отслеживания ответов на команды (ключ: "node_id:action")
+        self._pending_responses: dict[str, asyncio.Future] = {}
+        self._response_timeout = response_timeout
+
+        logger.info(
+            "DomeClient initialized (URL: %s, control: %s)",
+            self.url,
+            self.enable_control,
+        )
 
     async def connect(self) -> None:
         """Подключение к серверу купола с автоматическим переподключением."""
@@ -64,6 +106,7 @@ class DomeClient:
             return
 
         self._running = True
+        self._telemetry_event.clear()
         asyncio.create_task(self._connection_loop())
         logger.info("DomeClient connection loop started")
 
@@ -72,25 +115,45 @@ class DomeClient:
         logger.info("DomeClient disconnecting...")
         self._running = False
 
+        # Отменяем все ожидающие ответы
+        for key, future in list(self._pending_responses.items()):
+            if not future.done():
+                future.cancel()
+            self._pending_responses.pop(key, None)
+
         if self._ws:
             try:
                 await self._ws.close()
             except Exception as e:
-                logger.error(f"Error closing WebSocket: {e}")
+                logger.error("Error closing WebSocket: %s", e)
 
         self._ws = None
         self._connected = False
         logger.info("DomeClient disconnected")
 
+    async def wait_for_telemetry(self, timeout: float = 10.0) -> bool:
+        """
+        Дождаться первой (или очередной) телеметрии.
+
+        Returns:
+            True если телеметрия пришла, False при таймауте.
+        """
+        try:
+            await asyncio.wait_for(self._telemetry_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
     async def _connection_loop(self) -> None:
         """Основной цикл подключения с автоматическим переподключением."""
         while self._running:
             try:
-                logger.info(f"Connecting to dome server at {self.url}...")
+                logger.info("Connecting to dome server at %s...", self.url)
                 async with websockets.connect(
                     self.url,
                     ping_interval=20,
                     ping_timeout=10,
+                    max_size=10_000_000,
                 ) as ws:
                     self._ws = ws
                     self._connected = True
@@ -104,12 +167,14 @@ class DomeClient:
                 logger.info("Connection loop cancelled")
                 break
             except Exception as e:
-                logger.error(f"Connection error: {e}")
+                logger.error("Connection error: %s", e)
                 self._connected = False
                 self._ws = None
 
                 if self._running:
-                    logger.info(f"Reconnecting in {self.reconnect_delay} seconds...")
+                    logger.info(
+                        "Reconnecting in %.1f seconds...", self.reconnect_delay
+                    )
                     await asyncio.sleep(self.reconnect_delay)
 
     async def _handle_message(self, message: str) -> None:
@@ -126,21 +191,32 @@ class DomeClient:
 
             elif msg_type == "switch_mode_response":
                 # Ответ на переключение режима узла (не используем пока)
-                logger.debug(f"Switch mode response: {data}")
+                logger.debug("Switch mode response: %s", data)
 
             else:
-                logger.debug(f"Unknown message type: {msg_type}")
+                logger.debug("Unknown message type: %s", msg_type)
 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse message: {e}")
+            logger.error("Failed to parse message: %s", e)
         except Exception as e:
-            logger.error(f"Error handling message: {e}")
+            logger.error("Error handling message: %s", e)
 
     async def _handle_telemetry(self, data: dict) -> None:
         """Обработка сообщения с телеметрией."""
         async with self._lock:
-            self._latest_telemetry = data.get("data", {})
-            logger.debug(f"Telemetry updated: {len(self._latest_telemetry.get('nodes', {}))} nodes")
+            # Нормализуем: берём payload + сохраняем timestamp с верхнего уровня,
+            # если его нет внутри data
+            payload = data.get("data", data)
+            if isinstance(payload, dict):
+                if "timestamp" not in payload and "timestamp" in data:
+                    payload = {**payload, "timestamp": data["timestamp"]}
+                self._latest_telemetry = payload
+            else:
+                self._latest_telemetry = data
+
+            self._telemetry_event.set()
+            nodes = self._latest_telemetry.get("nodes", {}) if self._latest_telemetry else {}
+            logger.debug("Telemetry updated: %d nodes", len(nodes))
 
     async def _handle_control_response(self, data: dict) -> None:
         """Обработка ответа на управляющую команду."""
@@ -148,17 +224,32 @@ class DomeClient:
         action = data.get("action")
         key = f"{node_id}:{action}"
 
-        if key in self._pending_responses:
-            future = self._pending_responses.pop(key)
-            if not future.done():
-                future.set_result(data)
-                logger.debug(f"Control response received: {key} -> {data.get('success')}")
+        future = self._pending_responses.pop(key, None)
+
+        # Fallback: если сервер не вернул node_id/action, но есть ровно один
+        # ожидающий ответ — отдаём его (совместимость с простым протоколом)
+        if future is None and len(self._pending_responses) == 1:
+            only_key = next(iter(self._pending_responses))
+            future = self._pending_responses.pop(only_key)
+            logger.debug(
+                "Control response matched by fallback (only pending): %s", only_key
+            )
+
+        if future is not None and not future.done():
+            future.set_result(data)
+            logger.debug(
+                "Control response received: %s -> success=%s",
+                key,
+                data.get("success"),
+            )
+        else:
+            logger.debug("Unsolicited control_response: %s", data)
 
     async def send_control_command(
         self,
         node_id: str,
         action: str,
-        **params
+        **params: Any,
     ) -> dict[str, Any]:
         """
         Отправка управляющей команды на сервер купола.
@@ -186,36 +277,34 @@ class DomeClient:
         if not self.is_connected():
             raise RuntimeError("Not connected to dome server")
 
-        # Формируем команду
         command = {
             "type": "control",
             "node_id": node_id,
             "action": action,
-            **params
+            **params,
         }
 
-        # Создаем Future для ожидания ответа
         key = f"{node_id}:{action}"
-        future = asyncio.Future()
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_responses[key] = future
 
         try:
-            # Отправляем команду
-            await self._ws.send(json.dumps(command))
-            logger.info(f"Control command sent: {node_id}.{action} {params}")
+            await self._ws.send(json.dumps(command, ensure_ascii=False))
+            logger.info("Control command sent: %s.%s %s", node_id, action, params)
 
-            # Ожидаем ответ с таймаутом
-            response = await asyncio.wait_for(future, timeout=self._response_timeout)
+            response = await asyncio.wait_for(
+                future, timeout=self._response_timeout
+            )
             return response
 
         except asyncio.TimeoutError:
             self._pending_responses.pop(key, None)
-            logger.error(f"Control command timeout: {key}")
+            logger.error("Control command timeout: %s", key)
             raise
 
         except Exception as e:
             self._pending_responses.pop(key, None)
-            logger.error(f"Error sending control command: {e}")
+            logger.error("Error sending control command: %s", e)
             raise
 
     def get_latest_telemetry(self) -> dict[str, Any] | None:
@@ -284,44 +373,167 @@ class DomeClient:
 
     def get_connection_info(self) -> dict[str, Any]:
         """Получить информацию о подключении."""
+        ts = None
+        if self._latest_telemetry and self._latest_telemetry.get("timestamp"):
+            try:
+                ts = datetime.fromtimestamp(
+                    self._latest_telemetry["timestamp"]
+                ).isoformat()
+            except (TypeError, ValueError, OSError):
+                ts = str(self._latest_telemetry.get("timestamp"))
+
         return {
             "url": self.url,
             "connected": self._connected,
             "running": self._running,
             "enable_control": self.enable_control,
-            "last_telemetry": (
-                datetime.fromtimestamp(self._latest_telemetry.get("timestamp", 0)).isoformat()
-                if self._latest_telemetry and self._latest_telemetry.get("timestamp")
-                else None
-            ),
+            "last_telemetry": ts,
         }
 
 
-# Глобальный экземпляр клиента
+# Глобальный экземпляр клиента (совместимость с существующим кодом приложения)
 dome_client = DomeClient()
 
 
-if __name__ == "__main__":
-    # Пример использования клиента
-    async def main():
-        await dome_client.connect()
-        await asyncio.sleep(5)  # Ждем немного, чтобы получить телеметрию
-        telemetry = dome_client.get_latest_telemetry()
-        print("Latest telemetry:", telemetry)
-        await dome_client.disconnect()
-        
-        await asyncio.sleep(5)
-        
-        t = dome_client.get_key_nodes()
-        print("Key nodes:", t)
-        
-        try:
-            result = await dome_client.send_control_command("line_1", "enable")
-            if result.get("success"):
-                print("Control command succeeded:", result)
-            else:
-                print("Control command failed:", result)
-        except RuntimeError as e:
-            print("Error:", e)
+# ---------------------------------------------------------------------------
+# Вспомогательный вывод телеметрии (для автономного теста)
+# ---------------------------------------------------------------------------
+def _print_telemetry(payload: dict[str, Any] | None) -> None:
+    print("\n" + "=" * 70)
+    print("📡 TELEMETRY")
+    print("=" * 70)
 
-    asyncio.run(main())
+    if not payload:
+        print("  (пусто)")
+        print("=" * 70)
+        return
+
+    timestamp = payload.get("timestamp")
+    if timestamp:
+        try:
+            print(f"Time:        {datetime.fromtimestamp(timestamp)}")
+        except (TypeError, ValueError, OSError):
+            print(f"Timestamp:   {timestamp}")
+
+    print(f"Sim time:    {payload.get('sim_time')}")
+    print(f"Time scale:  {payload.get('time_scale')}")
+
+    nodes = payload.get("nodes", {})
+    node_modes = payload.get("node_modes", {})
+    active_crises = payload.get("active_crises", [])
+
+    print("\nNodes:")
+    if isinstance(nodes, dict) and nodes:
+        for node_id, node_data in nodes.items():
+            mode = node_modes.get(node_id, "?")
+            if isinstance(node_data, dict):
+                print(
+                    f"  {node_id:<22} "
+                    f"mode={mode:<7} "
+                    f"{json.dumps(node_data, ensure_ascii=False)}"
+                )
+            else:
+                print(f"  {node_id:<22} mode={mode:<7} {node_data}")
+    else:
+        print("  (нет узлов)")
+
+    print("\nActive crises:")
+    if active_crises:
+        for crisis in active_crises:
+            print(f"  - {crisis}")
+    else:
+        print("  none")
+
+    print("=" * 70)
+
+
+# ---------------------------------------------------------------------------
+# Тестовый сценарий (аналог client_test.py)
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+
+    async def run_test_scenario() -> None:
+        client = DomeClient(
+            url=os.getenv("DOME_SERVER_URL", "ws://localhost:8765"),
+            enable_control=True,
+            response_timeout=5.0,
+        )
+
+        print("\n" + "#" * 70)
+        print("# TEST SCENARIO START (dome_client)")
+        print("#" * 70)
+
+        await client.connect()
+
+        # --- Шаг 1: ждём первую телеметрию ---
+        print("\n⏳ Ожидание первой телеметрии...")
+        ok = await client.wait_for_telemetry(timeout=10.0)
+        if ok:
+            print("✅ Телеметрия получена.")
+            _print_telemetry(client.get_latest_telemetry())
+        else:
+            print("⚠️ Телеметрия не пришла вовремя, продолжаем...")
+
+        await asyncio.sleep(0.5)
+
+        # --- Шаг 2: запуск дизель-генератора ---
+        print("\n" + "#" * 70)
+        print("# STEP 2: Запуск дизель-генератора (diesel_1)")
+        print("#" * 70)
+        try:
+            diesel_response = await client.send_control_command(
+                "diesel_1", "start"
+            )
+            print("\n📥 SERVER RESPONSE:")
+            print(json.dumps(diesel_response, ensure_ascii=False, indent=2))
+            if diesel_response.get("success"):
+                print("✅ Дизель-генератор успешно запущен.")
+            else:
+                print("❌ Не удалось запустить дизель-генератор.")
+        except asyncio.TimeoutError:
+            print("❌ Таймаут ожидания ответа на start diesel_1")
+        except Exception as e:
+            print(f"❌ Ошибка: {e}")
+
+        # Даём симулятору обновить состояние
+        await asyncio.sleep(5.0)
+        print("\n📡 Телеметрия после запуска дизеля:")
+        _print_telemetry(client.get_latest_telemetry())
+
+        # --- Шаг 3: включение линии line_1 ---
+        print("\n" + "#" * 70)
+        print("# STEP 3: Включение линии line_1")
+        print("#" * 70)
+        try:
+            line_response = await client.send_control_command(
+                "line_1", "enable"
+            )
+            print("\n📥 SERVER RESPONSE:")
+            print(json.dumps(line_response, ensure_ascii=False, indent=2))
+            if line_response.get("success"):
+                print("✅ Линия line_1 успешно включена.")
+            else:
+                print("❌ Не удалось включить линию line_1.")
+        except asyncio.TimeoutError:
+            print("❌ Таймаут ожидания ответа на enable line_1")
+        except Exception as e:
+            print(f"❌ Ошибка: {e}")
+
+        await asyncio.sleep(5.0)
+        print("\n📡 Телеметрия после включения line_1:")
+        _print_telemetry(client.get_latest_telemetry())
+
+        print("\n" + "#" * 70)
+        print("# TEST SCENARIO COMPLETE")
+        print("#" * 70)
+
+        await client.disconnect()
+
+    try:
+        asyncio.run(run_test_scenario())
+    except KeyboardInterrupt:
+        print("\nКлиент остановлен.")
