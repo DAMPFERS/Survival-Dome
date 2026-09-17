@@ -88,9 +88,13 @@ class GameState:
         conn.close()
 
     def get_recent_history(self, session_id: str, limit: int) -> list[dict]:
+        """История для контекста LLM: только user/assistant.
+        Служебные записи (role='system', например лог выполненных команд)
+        сюда не попадают — они только для админ-лога."""
         conn = _connect()
         rows = conn.execute(
-            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            "SELECT role, content FROM messages WHERE session_id = ? AND role IN ('user', 'assistant') "
+            "ORDER BY id DESC LIMIT ?",
             (session_id, limit),
         ).fetchall()
         conn.close()

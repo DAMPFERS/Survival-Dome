@@ -13,6 +13,11 @@ from app.llm_adapter import get_llm_adapter
 from app.dome_client import dome_client
 from app.tools import DOME_CONTROL_TOOLS, CLIMATE_SYSTEM_MAPPING
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Quest AI Character")
@@ -210,9 +215,13 @@ async def chat_ws(websocket: WebSocket):
                     })
                     
                     # Формируем сообщение с результатами для LLM
-                    results_text = "\n".join([
-                        f"- {r.get('message')}" for r in tool_results
-                    ])
+                    results_lines = []
+                    for r in tool_results:
+                        line = f"- {r.get('message')}"
+                        if r.get("data"):
+                            line += f" | данные: {json.dumps(r['data'], ensure_ascii=False)}"
+                        results_lines.append(line)
+                    results_text = "\n".join(results_lines)
                     
                     messages.append({
                         "role": "user",

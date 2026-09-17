@@ -26,7 +26,7 @@ def format_telemetry_for_prompt(telemetry: dict[str, Any] | None) -> str:
         status = "работает" if diesel.get('output_kw', 0) > 0 else "выключен"
         lines.append(f"⚡ Дизель-генератор: {status}, {diesel.get('output_kw', 0):.1f} кВт")
     
-    # Линии передачи (показываем только активные или с нагрузкой)
+    # Линии передачи (показываем статус всех линий, включая выключенные)
     active_lines = []
     for i in range(1, 9):
         line_id = f"line_{i}"
@@ -34,8 +34,7 @@ def format_telemetry_for_prompt(telemetry: dict[str, Any] | None) -> str:
             line = nodes[line_id]
             status = line.get("status", "unknown")
             load = line.get("current_load_kw", 0)
-            if status == "ok" or load > 0:
-                active_lines.append(f"L{i}: {status} ({load:.1f} кВт)")
+            active_lines.append(f"L{i}: {status} ({load:.1f} кВт)")
     
     if active_lines:
         lines.append(f"📊 Линии: {', '.join(active_lines)}")
