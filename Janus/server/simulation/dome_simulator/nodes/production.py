@@ -5,8 +5,12 @@ printer_3d, cnc, material_inventory, equipment_cooling.
 
 Принтер и фрезер сами берут задания в рабочее время (auto_jobs), чтобы
 в песочнице было что наблюдать. Задание можно запустить и вручную:
-действие start_job с value={"file_name": ..., "duration_s": ...}
-(duration_s — в игровых секундах).
+действие start_job с value={"file_name": ..., "duration_s": ..., "filament_g": ...}
+(duration_s — в секундах времени устройства; filament_g — расход филамента на деталь).
+
+Д10: принтер — мощность нагревателей (heater_power_pct), калибровка оси X
+(rotation_distance_x), расход филамента по заданию; ЧПУ — температура шпинделя
+(spindle_temp_c) от контура охлаждения; склад — учёт катушки на принтере.
 """
 from __future__ import annotations
 
@@ -45,9 +49,16 @@ def _job_from_value(value: Any, default_duration_s: float) -> tuple[str, float]:
         return value.strip(), default_duration_s
     if isinstance(value, dict) and value.get("file_name"):
         duration = parse_number(value.get("duration_s", default_duration_s), 1.0, 7 * 86400.0,
-                                "Длительность задания, игровые секунды")
+                                "Длительность задания, с")
         return str(value["file_name"]), duration
     raise ControlError('start_job: ожидалось имя файла или {"file_name": ..., "duration_s": ...}')
+
+
+def _filament_from_value(value: Any, duration_s: float) -> float:
+    """Расход филамента на задание, г (по умолчанию ~12 г на час печати)."""
+    if isinstance(value, dict) and value.get("filament_g") is not None:
+        return parse_number(value["filament_g"], 0.0, 5000.0, "Расход филамента, г")
+    return round(12.0 * duration_s / 3600.0, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -67,17 +78,24 @@ PRINT_JOBS = [
 @register_node_type("printer_3d")
 class Printer3D(SandboxNode):
     """
-    Вход для правил: control_powered (линия 3 щитка). Без питания принтер
-    уходит offline, а текущая печать — в ERROR (POWER_LOSS).
+    Входы для правил: control_powered (линия 3 щитка) — без питания принтер
+    уходит offline, а текущая печать — в ERROR (POWER_LOSS); control_spool_g —
+    остаток филамента на катушке (склад): при 0 — FILAMENT_RUNOUT и пауза (К13).
 
     webhook_state отстаёт от real_state на один тик — так ведёт себя
     webhook-сервис реального принтера.
+
+    Потребление: нагрев стола 350 Вт + сопла 40 Вт, поддержание ~90 + 15 Вт,
+    электроника/моторы 25 Вт. Пауза дольше 10 мин — расслоение корпуса
+    (error_code LAYER_ADHESION, part_defect), №6.
     """
     title = "3D-принтер Anycubic Kobra 2 Pro"
     system = "Производство"
     category = "production"
 
     NOZZLE_PRINT_C, BED_PRINT_C, NOZZLE_STANDBY_C = 210.0, 60.0, 170.0
+    ROTATION_DISTANCE_X = 40.0  # заводская калибровка (документация)
+    ADHESION_PAUSE_S = 600.0
 
     def __init__(self, node_id: str, auto_jobs: bool = True, job_rate_per_hour: float = 0.4,
                  error_rate_per_hour: float = 0.02, seed: Optional[int] = None) -> None:
@@ -86,6 +104,7 @@ class Printer3D(SandboxNode):
         self.job_rate_per_hour = job_rate_per_hour
         self.error_rate_per_hour = error_rate_per_hour
         self._completed_age_s = 0.0
+        self._paused_s = 0.0
 
     def initial_state(self) -> dict[str, Any]:
         return {
@@ -104,25 +123,61 @@ class Printer3D(SandboxNode):
             "last_gcode": None,
             "gcode_state": "OK",           # OK | ERROR
             "gcode_error": None,
-            "error_code": None,            # FILAMENT_RUNOUT | THERMAL_RUNAWAY | POWER_LOSS | EMERGENCY_STOP
+            "error_code": None,            # FILAMENT_RUNOUT | THERMAL_RUNAWAY | POWER_LOSS | EMERGENCY_STOP | LAYER_ADHESION
             "webhook_state": "IDLE",
             "real_state": "IDLE",
+            "power_w": 8.0,
+            "heater_power_pct": 0.0,       # мощность нагревателя сопла (extruder.power в Klipper)
+            "bed_heater_power_pct": 0.0,
+            "rotation_distance_x": self.ROTATION_DISTANCE_X,
+            "filament_required_g": 0.0,
+            "filament_used_g": 0.0,
+            "part_defect": None,           # причина брака текущей детали
             "control_powered": True,
+            "control_spool_g": None,
         }
 
-    def _start(self, file_name: str, duration_s: float) -> dict[str, Any]:
-        self.emit("printer.job_started", file_name=file_name, duration_s=duration_s)
+    def _start(self, file_name: str, duration_s: float, filament_g: Optional[float] = None) -> dict[str, Any]:
+        filament_g = round(12.0 * duration_s / 3600.0, 1) if filament_g is None else filament_g
+        self.emit("printer.job_started", file_name=file_name, duration_s=duration_s, filament_g=filament_g)
+        self._paused_s = 0.0
         return {
             "state": "PRINTING", "paused": False, "file_name": file_name,
             "progress_pct": 0.0, "print_elapsed_s": 0.0, "print_duration_s": duration_s,
-            "print_time_left_s": duration_s, "error_code": None,
+            "print_time_left_s": duration_s, "error_code": None, "part_defect": None,
+            "filament_required_g": filament_g, "filament_used_g": 0.0,
             "nozzle_target_c": self.NOZZLE_PRINT_C, "bed_target_c": self.BED_PRINT_C,
         }
+
+    @staticmethod
+    def _heat(temp: float, goal: float, ambient: float, rate_c_s: float, cool_tau_s: float, dt: float) -> float:
+        """Нагреватель с ограниченной мощностью: к цели — не быстрее rate_c_s,
+        остывание — экспоненциально к цели/окружению."""
+        if goal > temp:
+            return min(goal, temp + rate_c_s * dt)
+        return relax(temp, goal, cool_tau_s, dt)
+
+    def filament_rate_g_h(self, node: dict[str, Any]) -> float:
+        """Текущий расход филамента (для правила «принтер → склад»)."""
+        if node["state"] != "PRINTING" or node["print_duration_s"] <= 0:
+            return 0.0
+        heated = (node["nozzle_temp_c"] >= node["nozzle_target_c"] - 5.0
+                  and node["bed_temp_c"] >= node["bed_target_c"] - 3.0)
+        return node["filament_required_g"] / node["print_duration_s"] * 3600.0 if heated else 0.0
 
     def simulate(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
         ambient = self.env.indoor.temperature_c
         u: dict[str, Any] = {}
         state = node["state"]
+
+        if state == "PAUSED" and node["control_powered"]:
+            self._paused_s += gdt
+            if self._paused_s >= self.ADHESION_PAUSE_S and node["error_code"] != "LAYER_ADHESION":
+                self.emit("printer.error", Severity.WARNING, error_code="LAYER_ADHESION",
+                          file_name=node["file_name"], paused_s=round(self._paused_s))
+                u.update(error_code="LAYER_ADHESION", part_defect="LAYER_ADHESION")
+        elif state == "PRINTING":
+            self._paused_s = 0.0
 
         if not node["control_powered"]:
             if state in ("PRINTING", "PAUSED"):
@@ -144,10 +199,26 @@ class Printer3D(SandboxNode):
 
         nozzle_target = u.get("nozzle_target_c", node["nozzle_target_c"])
         bed_target = u.get("bed_target_c", node["bed_target_c"])
-        nozzle = relax(node["nozzle_temp_c"], max(ambient, nozzle_target), 40, gdt)
-        bed = relax(node["bed_temp_c"], max(ambient, bed_target), 240, gdt)
+        nozzle_goal = max(ambient, nozzle_target)
+        bed_goal = max(ambient, bed_target)
+        nozzle = self._heat(node["nozzle_temp_c"], nozzle_goal, ambient, 3.0, 60.0, gdt)
+        bed = self._heat(node["bed_temp_c"], bed_goal, ambient, 0.3, 300.0, gdt)
         u["nozzle_temp_c"] = round(nozzle + self.noise(0.4), 1)
         u["bed_temp_c"] = round(bed + self.noise(0.2), 1)
+
+        # Нагреватели: полная мощность при нагреве, поддержание — доля мощности
+        powered = node["control_powered"]
+        nozzle_pct = 0.0
+        if powered and nozzle_target > 0:
+            nozzle_pct = 100.0 if nozzle < nozzle_target - 3.0 else 30.0 + self.noise(2.0)
+        bed_pct = 0.0
+        if powered and bed_target > 0:
+            bed_pct = 100.0 if bed < bed_target - 2.0 else 26.0 + self.noise(2.0)
+        busy = u.get("state", state) in ("PRINTING", "PAUSED")
+        power = (25.0 if busy else 8.0) + 350.0 * bed_pct / 100.0 + 40.0 * nozzle_pct / 100.0
+        u["heater_power_pct"] = round(clamp(nozzle_pct, 0.0, 100.0), 1)
+        u["bed_heater_power_pct"] = round(clamp(bed_pct, 0.0, 100.0), 1)
+        u["power_w"] = round(power if powered else 0.0, 1)
 
         u["webhook_state"] = node["real_state"]
         u["real_state"] = u.get("state", state)
@@ -161,16 +232,26 @@ class Printer3D(SandboxNode):
 
         heated = (node["nozzle_temp_c"] >= node["nozzle_target_c"] - 5.0
                   and node["bed_temp_c"] >= node["bed_target_c"] - 3.0)
+        spool = node.get("control_spool_g")
+        if heated and spool is not None and float(spool) <= 0.0:
+            # катушка кончилась — Klipper ставит печать на паузу по датчику филамента
+            self.emit("printer.error", Severity.WARNING, error_code="FILAMENT_RUNOUT", file_name=node["file_name"],
+                      progress_pct=node["progress_pct"])
+            return {"state": "PAUSED", "paused": True, "error_code": "FILAMENT_RUNOUT",
+                    "nozzle_target_c": self.NOZZLE_STANDBY_C}
         elapsed = node["print_elapsed_s"] + (gdt if heated else 0.0)
         duration = node["print_duration_s"]
+        used = node.get("filament_used_g", 0.0) + (node["filament_required_g"] * gdt / duration if heated else 0.0)
         if elapsed >= duration:
             self._completed_age_s = 0.0
-            self.emit("printer.job_done", file_name=node["file_name"])
+            self.emit("printer.job_done", file_name=node["file_name"], part_defect=node.get("part_defect"))
             return {"state": "COMPLETED", "progress_pct": 100.0, "print_elapsed_s": duration,
-                    "print_time_left_s": 0.0, "nozzle_target_c": 0.0, "bed_target_c": 0.0}
+                    "print_time_left_s": 0.0, "nozzle_target_c": 0.0, "bed_target_c": 0.0,
+                    "filament_used_g": round(node["filament_required_g"], 1)}
         return {"print_elapsed_s": round(elapsed, 1),
                 "progress_pct": round(elapsed / duration * 100.0, 1),
-                "print_time_left_s": round(duration - elapsed, 0)}
+                "print_time_left_s": round(duration - elapsed, 0),
+                "filament_used_g": round(used, 2)}
 
     # ---- управление ----
 
@@ -190,7 +271,11 @@ class Printer3D(SandboxNode):
         self._require_online(node)
         if node["state"] != "PAUSED":
             raise ControlError(f"Продолжение невозможно в состоянии {node['state']}")
-        return {"state": "PRINTING", "paused": False, "nozzle_target_c": self.NOZZLE_PRINT_C}
+        spool = node.get("control_spool_g")
+        if node["error_code"] == "FILAMENT_RUNOUT" and spool is not None and float(spool) <= 0.0:
+            raise ControlError("Филамент закончился: сначала замените катушку")
+        error = node["error_code"] if node["error_code"] == "LAYER_ADHESION" else None
+        return {"state": "PRINTING", "paused": False, "nozzle_target_c": self.NOZZLE_PRINT_C, "error_code": error}
 
     @control("abort", "stop", "cancel_job")
     def _abort(self, node, value):
@@ -198,7 +283,8 @@ class Printer3D(SandboxNode):
             raise ControlError(f"Нечего прерывать в состоянии {node['state']}")
         return {"state": "IDLE", "paused": False, "file_name": None, "progress_pct": 0.0,
                 "print_elapsed_s": 0.0, "print_duration_s": 0.0, "print_time_left_s": 0.0,
-                "error_code": None, "nozzle_target_c": 0.0, "bed_target_c": 0.0}
+                "error_code": None, "nozzle_target_c": 0.0, "bed_target_c": 0.0,
+                "filament_required_g": 0.0, "filament_used_g": 0.0, "part_defect": None}
 
     @control("home")
     def _home(self, node, value):
@@ -212,7 +298,8 @@ class Printer3D(SandboxNode):
         self._require_online(node)
         if node["state"] not in ("IDLE", "COMPLETED"):
             raise ControlError(f"Принтер занят (состояние {node['state']})")
-        return self._start(*_job_from_value(value, 2 * 3600.0))
+        file_name, duration = _job_from_value(value, 2 * 3600.0)
+        return self._start(file_name, duration, _filament_from_value(value, duration))
 
     @control("send_gcode", "gcode")
     def _send_gcode(self, node, value):
@@ -279,13 +366,22 @@ GRBL_ALARMS = {
 
 @register_node_type("cnc")
 class CNCMill(SandboxNode):
-    """Координаты — в миллиметрах рабочей области 300×180×45. Вход для правил: control_powered."""
+    """
+    Координаты — в миллиметрах рабочей области 300×180×45.
+    Входы для правил: control_powered (линия 2 щитка), control_coolant_temp_c
+    (температура жидкости контура охлаждения → spindle_temp_c).
+
+    Без питания GRBL сбрасывается: ALARM:3, позиция потеряна (homed=False).
+    FeedHold останавливает шпиндель (парковка), Resume — раскручивает снова.
+    Качество: spindle_temp_c > 40 °C — DEGRADED, > 45 °C — OVERHEAT (брак, К7).
+    """
     title = "ЧПУ-фрезер 3018 Pro"
     system = "Производство"
     category = "production"
 
     TRAVEL = (300.0, 180.0, 45.0)
     SPINDLE_RPM = 10000.0
+    SPINDLE_W, STEPPERS_W, IDLE_W = 250.0, 40.0, 25.0
 
     def __init__(self, node_id: str, auto_jobs: bool = True, job_rate_per_hour: float = 0.25,
                  alarm_rate_per_hour: float = 0.02, seed: Optional[int] = None) -> None:
@@ -312,14 +408,19 @@ class CNCMill(SandboxNode):
             "error_code": None,            # последний ответ GRBL error:N на команду
             "error_text": None,
             "last_gcode": None,
+            "power_w": self.IDLE_W,
+            "spindle_temp_c": 22.0,
+            "quality_state": "OK",         # OK | DEGRADED | OVERHEAT
+            "part_defect": None,
             "control_powered": True,
+            "control_coolant_temp_c": None,
         }
 
     def _start(self, file_name: str, duration_s: float) -> dict[str, Any]:
         self.emit("cnc.job_started", file_name=file_name, duration_s=duration_s)
         return {"state": "RUNNING", "paused": False, "file_name": file_name, "progress_pct": 0.0,
                 "job_elapsed_s": 0.0, "job_duration_s": duration_s, "job_time_left_s": duration_s,
-                "spindle_target_rpm": self.SPINDLE_RPM}
+                "spindle_target_rpm": self.SPINDLE_RPM, "part_defect": None}
 
     def _toolpath(self, t: float) -> tuple[float, float, float]:
         """Правдоподобная траектория фрезеровки платы: обход контуров + редкие холостые ходы."""
@@ -348,6 +449,25 @@ class CNCMill(SandboxNode):
         target = u.get("spindle_target_rpm", node["spindle_target_rpm"])
         rpm = relax(node["spindle_rpm"], target, 5, gdt)
         u["spindle_rpm"] = round(rpm + (self.noise(60.0) if rpm > 100 else 0.0), 0) if rpm > 1 else 0.0
+
+        spinning = rpm > 500
+        running = u.get("state", state) == "RUNNING"
+        if node["control_powered"]:
+            u["power_w"] = round(self.IDLE_W + (self.SPINDLE_W * rpm / self.SPINDLE_RPM if spinning else 0.0)
+                                 + (self.STEPPERS_W if running else 0.0), 1)
+        else:
+            u["power_w"] = 0.0
+        coolant = node.get("control_coolant_temp_c")
+        coolant = self.env.indoor.temperature_c + 6.0 if coolant is None else float(coolant)
+        spindle_t = relax(node["spindle_temp_c"], coolant + (4.0 if spinning else 0.0), 90.0, gdt)
+        u["spindle_temp_c"] = round(spindle_t + self.noise(0.1), 1)
+        quality = "OVERHEAT" if spindle_t > 45.0 else ("DEGRADED" if spindle_t > 40.0 else "OK")
+        if quality != node["quality_state"] and quality != "OK":
+            self.emit("cnc.spindle_temperature", Severity.WARNING if quality == "DEGRADED" else Severity.CRITICAL,
+                      quality_state=quality, spindle_temp_c=round(spindle_t, 1))
+        u["quality_state"] = quality
+        if running and quality == "OVERHEAT" and not node.get("part_defect"):
+            u["part_defect"] = "SPINDLE_OVERHEAT"
         return u
 
     def _advance(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
@@ -378,14 +498,15 @@ class CNCMill(SandboxNode):
         self._require_ready(node)
         if node["state"] != "RUNNING":
             raise ControlError(f"FeedHold невозможен в состоянии {node['state']}")
-        return {"state": "PAUSED", "paused": True}
+        return {"state": "PAUSED", "paused": True, "spindle_target_rpm": 0.0}
 
     @control("resume", "cycle_start", "~")
     def _resume(self, node, value):
         self._require_ready(node)
         if node["state"] != "PAUSED":
             raise ControlError(f"Resume невозможен в состоянии {node['state']}")
-        return {"state": "RUNNING", "paused": False}
+        spindle = self.SPINDLE_RPM if node["file_name"] else node["spindle_target_rpm"]
+        return {"state": "RUNNING", "paused": False, "spindle_target_rpm": spindle}
 
     @control("abort", "stop", "cancel_job", "soft_reset")
     def _abort(self, node, value):
@@ -470,26 +591,40 @@ class CNCMill(SandboxNode):
 class MaterialInventory(SensorNode):
     """
     Истинные остатки хранятся в узле; наружу — показания весов/датчиков с шумом.
-    Входы для правил (расход в час): control_filament_usage_g_h,
+    filament_g — филамент на катушке, установленной в принтер (весы держателя);
+    filament_pct — от полной катушки. spare_spools — запасные катушки.
+    Входы для правил (расход в час): control_filament_usage_g_h (от принтера),
     control_blanks_usage_per_h, control_consumables_usage_pct_h.
+    Замена катушки — физическое действие Оператора replace_spool (К13).
     """
     title = "Склад материалов"
     system = "Производство"
     category = "production"
 
-    def __init__(self, node_id: str, filament_capacity_g: float = 3000.0, filament_g: float = 2400.0,
-                 cnc_blanks: int = 30, consumables_pct: float = 85.0, glitch_rate_per_hour: float = 0.01,
-                 seed: Optional[int] = None) -> None:
+    def __init__(self, node_id: str, filament_capacity_g: float = 1000.0, filament_g: float = 850.0,
+                 spare_spools: int = 3, cnc_blanks: int = 30, consumables_pct: float = 85.0,
+                 glitch_rate_per_hour: float = 0.01, seed: Optional[int] = None) -> None:
         super().__init__(node_id, glitch_rate_per_hour, seed)
         self.filament_capacity_g = filament_capacity_g
         self._filament_g = filament_g
+        self._spare_spools = spare_spools
         self._blanks = float(cnc_blanks)
         self._consumables_pct = consumables_pct
+
+    @property
+    def true_filament_g(self) -> float:
+        return self._filament_g
+
+    def set_spool(self, grams: float) -> None:
+        """Начальные условия сценария: неполная катушка (К13)."""
+        self._filament_g = max(0.0, float(grams))
 
     def initial_state(self) -> dict[str, Any]:
         return {
             "filament_g": self._filament_g,
             "filament_pct": round(self._filament_g / self.filament_capacity_g * 100, 1),
+            "spool_capacity_g": self.filament_capacity_g,
+            "spare_spools": self._spare_spools,
             "cnc_blanks_count": int(self._blanks),
             "consumables_pct": self._consumables_pct,
             "low_stock_warnings": [],
@@ -497,6 +632,15 @@ class MaterialInventory(SensorNode):
             "control_blanks_usage_per_h": 0.0,
             "control_consumables_usage_pct_h": 0.0,
         }
+
+    @control("replace_spool", physical=True)
+    def _replace_spool(self, node, value):
+        """Оператор ставит новую катушку филамента."""
+        if node["spare_spools"] <= 0:
+            raise ControlError("Запасных катушек нет")
+        self._filament_g = self.filament_capacity_g
+        self.emit("inventory.spool_replaced", Severity.INFO)
+        return {"filament_g": self._filament_g, "filament_pct": 100.0, "spare_spools": node["spare_spools"] - 1}
 
     def measure(self, gdt: float, node: dict[str, Any], noise_k: float) -> dict[str, Any]:
         hours = gdt / 3600.0
@@ -536,10 +680,16 @@ class EquipmentCooling(SandboxNode):
     Жидкостный контур охлаждения ЧПУ и 3D-принтера.
     Вход для правил: control_heat_load_w — тепловая нагрузка от оборудования
     (None — типовой профиль рабочего дня).
+    Кризисный вход: control_air_in_loop — воздушная пробка, расход падает до 25 %
+    (К7); устраняется прокачкой контура bleed_loop (физически, ~1 мин).
+    Перегрев жидкости (> 45 °C) — авария OVERHEAT, насос продолжает работать.
     """
     title = "Охлаждение / чиллер для ЧПУ и 3D-принтера"
     system = "Производство"
     category = "production"
+
+    AIR_FLOW_K = 0.25
+    BLEED_S = 60.0
 
     def __init__(self, node_id: str, nominal_flow_l_min: float = 6.0, pump_rated_w: float = 60.0,
                  fault_rate_per_hour: float = 0.003, seed: Optional[int] = None) -> None:
@@ -548,6 +698,7 @@ class EquipmentCooling(SandboxNode):
         self.pump_rated_w = pump_rated_w
         self.fault_rate_per_hour = fault_rate_per_hour
         self._heat = OUProcess(1.0, 0.2, 900, self.rng)
+        self._bleed_s = 0.0
 
     def initial_state(self) -> dict[str, Any]:
         return {
@@ -559,7 +710,9 @@ class EquipmentCooling(SandboxNode):
             "state": ON,
             "alarm": False,
             "alarm_code": None,            # OVERHEAT | PUMP_FAULT
+            "bleeding": False,
             "control_heat_load_w": None,
+            "control_air_in_loop": False,
         }
 
     def simulate(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
@@ -575,24 +728,32 @@ class EquipmentCooling(SandboxNode):
             state, alarm_code = FAULT, "PUMP_FAULT"
             self.emit("cooling.alarm", Severity.WARNING, alarm_code=alarm_code)
 
+        u: dict[str, Any] = {}
+        if self._bleed_s > 0:
+            self._bleed_s -= gdt
+            if self._bleed_s <= 0:
+                u.update(bleeding=False, control_air_in_loop=False)
+                self.emit("cooling.bled", Severity.INFO)
+        air = bool(u.get("control_air_in_loop", node["control_air_in_loop"]))
+
         running = state == ON
         speed = node["speed_pct"] / 100.0 if running else 0.0
         flow = self.nominal_flow_l_min * speed * (1.0 + self.noise(0.02)) if running else 0.0
+        if air and running:
+            flow *= self.AIR_FLOW_K * (0.8 + 0.4 * speed)   # пробка: насос гонит воздух
         pump_w = self.pump_rated_w * speed ** 3 + (self.noise(0.5) if running else 0.0)
 
         # Установившийся перегрев жидкости: ΔT = Q / (G·c) плюс теплообменник с воздухом
-        cooling_capacity = 8.0 + 30.0 * flow  # Вт/°C
+        cooling_capacity = 2.0 + 12.0 * flow  # Вт/°C
         target = ambient + heat_w / cooling_capacity
         coolant = relax(node["coolant_temp_c"], target, 600, gdt) + self.noise(0.1)
         exchanger = ambient + (coolant - ambient) * 0.6 + self.noise(0.1)
 
         if coolant > 45.0 and alarm_code is None:
             alarm_code = "OVERHEAT"
-            if state == ON:
-                state = FAULT
             self.emit("cooling.alarm", Severity.CRITICAL, alarm_code=alarm_code, coolant_temp_c=round(coolant, 1))
 
-        return {
+        u.update({
             "coolant_temp_c": round(coolant, 1),
             "coolant_flow_l_min": round(max(0.0, flow), 2),
             "pump_power_w": round(max(0.0, pump_w), 1),
@@ -600,7 +761,14 @@ class EquipmentCooling(SandboxNode):
             "state": state,
             "alarm": alarm_code is not None,
             "alarm_code": alarm_code,
-        }
+        })
+        return u
+
+    @control("bleed_loop", physical=True)
+    def _bleed(self, node, value):
+        """Прокачка контура — удаление воздуха (Оператор, ~1 мин)."""
+        self._bleed_s = self.BLEED_S
+        return {"bleeding": True}
 
     @control("turn_on", "on", "start", "enable")
     def _turn_on(self, node, value):

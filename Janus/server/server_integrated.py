@@ -14,13 +14,34 @@ WebSocket-сервер купола: симулятор + реальное об�
 
 Типы запросов:
     все роли:  control, describe_nodes, ping
-    только админ: switch_mode, trigger_crisis, stop_crisis, time_control,
-                  set_active_team, get_policy, set_participant_access, reload_policy
+    только админ: switch_mode, trigger_crisis, stop_crisis, list_crises, start_shift,
+                  shift_report, time_control, set_active_team, get_policy,
+                  set_participant_access, reload_policy
+
+Телеметрия участника — то, что видит ИИ-агент (dome_crises.md): подмены
+показаний, заморозки узлов, обрывы связи. Админ дополнительно получает
+истинное состояние (true_nodes), отчёты кризисов и ход смены.
+
+Команды участника идут в симулятор с origin="agent": при обрыве связи они не
+проходят, физические действия Оператора (замена патчкорда и т.п.) недоступны.
+Админ выполняет любые действия, включая действия Оператора (origin="operator").
 
 Реальные устройства (real_devices.py) синхронизируются в фоне. Узел в режиме
 "real" берёт данные с железа, команды уходят на железо. Если DOME_AUTO_REAL=1,
 узел автоматически переходит в "real", как только устройство стало доступно
 (пока админ явно не переключил его в "virtual").
+
+Команды реальному узлу сначала проходят через симулятор (prepare_real_command):
+кризисы могут перехватить команду-решение и подменить её безопасным реальным
+эквивалентом (Д7). Команды автоматики и кризисов реальным устройствам
+(пауза станков, реле щита при блэкауте виртуальной энергосистемы — Д19)
+забираются из simulator.drain_real_commands() в цикле синхронизации.
+
+Энергосистема (DOME_ENERGY_MODE):
+    virtual (по умолчанию) — инвертор и АКБ на время смены виртуальные с одинаковым
+                              стартом; показания реального инвертора пишутся для админа;
+    demo                   — виртуальная энергосистема, но генерация PV — реальная;
+    real                   — инвертор и АКБ берут данные с железа (как раньше).
 """
 from __future__ import annotations
 
@@ -63,6 +84,8 @@ AUTH_TIMEOUT = float(os.getenv("DOME_AUTH_TIMEOUT", "10.0"))
 REAL_COMMAND_TIMEOUT = float(os.getenv("DOME_REAL_COMMAND_TIMEOUT", "10.0"))
 ACTIVE_TEAM = int(os.getenv("DOME_ACTIVE_TEAM", "1"))           # 1..4
 AUTO_REAL = os.getenv("DOME_AUTO_REAL", "1") not in ("0", "false", "False", "")
+ENERGY_MODE = os.getenv("DOME_ENERGY_MODE", "virtual").strip().lower()   # virtual | demo | real
+ENERGY_NODES = ("solar_inverter_01", "battery_01")
 KEYS_CONFIG = os.getenv("DOME_KEYS_CONFIG", str(SERVER_DIR / "authorization" / "keys_config.json"))
 POLICY_FILE = os.getenv("DOME_POLICY_FILE", str(SERVER_DIR / "authorization" / "access_policy.json"))
 
@@ -106,6 +129,8 @@ class DomeServer:
         self.policy = AccessPolicy(POLICY_FILE)
 
         self.simulator = create_dome_simulator(tick_interval=4.0, time_scale=1.0)
+        if ENERGY_MODE in ("virtual", "demo"):
+            self.simulator.set_energy_mode(ENERGY_MODE)
         self.adapters = build_adapters(lambda: self.simulator.get("smart_panel_01", "lines"))
         self.node_modes: dict[str, Mode] = {node_id: "virtual" for node_id in self.adapters}
         self.manual_virtual: set[str] = set()  # узлы, которые админ явно держит виртуальными
@@ -121,6 +146,9 @@ class DomeServer:
             "switch_mode": (self.handle_switch_mode, {ROLE_ADMIN}),
             "trigger_crisis": (self.handle_trigger_crisis, {ROLE_ADMIN}),
             "stop_crisis": (self.handle_stop_crisis, {ROLE_ADMIN}),
+            "list_crises": (self.handle_list_crises, {ROLE_ADMIN}),
+            "start_shift": (self.handle_start_shift, {ROLE_ADMIN}),
+            "shift_report": (self.handle_shift_report, {ROLE_ADMIN}),
             "time_control": (self.handle_time_control, {ROLE_ADMIN}),
             "set_active_team": (self.handle_set_active_team, {ROLE_ADMIN}),
             "get_policy": (self.handle_get_policy, {ROLE_ADMIN}),
@@ -164,15 +192,40 @@ class DomeServer:
             await asyncio.sleep(REAL_SYNC_INTERVAL)
 
     def sync_real_to_simulator(self) -> None:
-        """Переносит данные реальных устройств в узлы, работающие в режиме real.
+        """Переносит данные реальных устройств в узлы, работающие в режиме real,
+        и исполняет команды автоматики/кризисов на реальном железе.
         Выполняется в отдельном потоке (опрос драйверов может блокировать)."""
         for node_id, adapter in self.adapters.items():
+            if node_id in ENERGY_NODES and ENERGY_MODE != "real":
+                # энергосистема смены виртуальная: реальные показания — для админа и PV в демо-режиме
+                if node_id == "solar_inverter_01":
+                    try:
+                        reading = adapter.read()
+                        if reading:
+                            self.simulator.feed_real_inverter(reading)
+                    except Exception as e:
+                        logger.error("Чтение реального инвертора не удалось: %s", e)
+                continue
             if (self.node_modes[node_id] == "virtual" and AUTO_REAL
                     and node_id not in self.manual_virtual and adapter.available()):
                 self.node_modes[node_id] = "real"
                 logger.info("%s: устройство доступно — узел переведён в REAL", node_id)
             if self.node_modes[node_id] == "real":
                 self.sync_node(node_id)
+        self.execute_pending_real_commands()
+
+    def execute_pending_real_commands(self) -> None:
+        """Команды реальным устройствам от автоматики и кризисов (пауза станков,
+        реле щита при блэкауте виртуальной энергосистемы). Вызывается из потока синхронизации."""
+        for node_id, action, value in self.simulator.drain_real_commands():
+            adapter = self.adapters.get(node_id)
+            if adapter is None or self.node_modes.get(node_id) != "real":
+                continue
+            try:
+                asyncio.run(asyncio.wait_for(adapter.execute(action, value), REAL_COMMAND_TIMEOUT))
+                logger.info("auto -> %s.%s(%r) [real]", node_id, action, value)
+            except Exception as e:
+                logger.error("Команда %s.%s(%r) реальному устройству не выполнена: %s", node_id, action, value, e)
 
     def sync_node(self, node_id: str) -> None:
         try:
@@ -186,7 +239,7 @@ class DomeServer:
     # ================= ТЕЛЕМЕТРИЯ =================
 
     def build_telemetry(self, session: Session) -> dict[str, Any]:
-        snap = self.simulator.snapshot()
+        snap = self.simulator.snapshot()          # телеметрия, которую видит агент
         env = self.simulator.environment_snapshot()
         tc = self.simulator.time_controller
         full = {
@@ -203,6 +256,17 @@ class DomeServer:
         }
         if session.role == ROLE_ADMIN:
             data = full
+            data.update({
+                "true_nodes": self.simulator.snapshot(view="truth")["nodes"],
+                "crisis_reports": self.simulator.crisis_reports(),
+                "telemetry_layer": self.simulator.telemetry.describe(),
+                "energy_mode": ENERGY_MODE,
+                "real_inverter": dict(self.simulator.ctx.real_inverter_reading),
+            })
+            if self.simulator.shift is not None:
+                shift = self.simulator.shift
+                data["shift"] = {"t_s": round(shift.t, 1), "finished": shift.finished,
+                                 "metrics": shift.metrics.to_dict()}
         else:
             fields = self.policy.telemetry_fields(session.role) or set()
             data = {"nodes": self.policy.filter_nodes(session.role, snap["nodes"])}
@@ -240,23 +304,31 @@ class DomeServer:
                 value["duration_s"] = data["duration_s"]
 
         canonical = self.simulator.resolve_action(node_id, action) or action.strip().lower()
-        if not self.policy.can_control(session.role, node_id, canonical):
+        if canonical != "reconnect" and not self.policy.can_control(session.role, node_id, canonical):
             allowed = self._allowed_controls(session, node_id)
             raise RequestError(f"Действие {action!r} для {node_id} недоступно. "
                                f"Разрешено: {allowed or 'ничего'}")
 
+        origin = self._origin(session, node_id, canonical)
         mode = self.node_modes.get(node_id, "virtual")
         if mode == "real":
             try:
-                await asyncio.wait_for(self.adapters[node_id].execute(canonical, value), REAL_COMMAND_TIMEOUT)
-            except RealCommandError as e:
+                # кризис может перехватить команду и заменить её безопасным реальным эквивалентом (Д7)
+                real_actions = self.simulator.prepare_real_command(node_id, action, value, origin=origin)
+            except ControlError as e:
                 raise RequestError(str(e)) from None
-            except asyncio.TimeoutError:
-                raise RequestError(f"Реальное устройство не ответило за {REAL_COMMAND_TIMEOUT:.0f} с") from None
+            for real_action, real_value in real_actions:
+                try:
+                    await asyncio.wait_for(self.adapters[node_id].execute(real_action, real_value),
+                                           REAL_COMMAND_TIMEOUT)
+                except RealCommandError as e:
+                    raise RequestError(str(e)) from None
+                except asyncio.TimeoutError:
+                    raise RequestError(f"Реальное устройство не ответило за {REAL_COMMAND_TIMEOUT:.0f} с") from None
             await asyncio.to_thread(self.sync_node, node_id)  # сразу показываем результат
         else:
             try:
-                self.simulator.control(node_id, action, value)
+                self.simulator.control(node_id, action, value, origin=origin)
             except ControlError as e:
                 if session.role != ROLE_ADMIN and "Доступно:" in str(e):
                     raise RequestError(f"Узел {node_id} не поддерживает действие {action!r}. "
@@ -265,6 +337,13 @@ class DomeServer:
 
         logger.info("%s control %s.%s(%r) [%s]", session, node_id, canonical, value, mode)
         return {"success": True, "node_id": node_id, "action": action, "mode": mode}
+
+    def _origin(self, session: Session, node_id: str, canonical: str) -> str:
+        """Участник — ИИ-агент; админ выполняет и действия Оператора (учитываются в метриках смены)."""
+        if session.role != ROLE_ADMIN:
+            return "agent"
+        info = next((n for n in self.simulator.describe_nodes() if n["node_id"] == node_id), {})
+        return "operator" if canonical in info.get("operator_controls", ()) else "admin"
 
     def _node_controls(self, node_id: str) -> list[str]:
         return next(n["controls"] for n in self.simulator.describe_nodes() if n["node_id"] == node_id)
@@ -327,6 +406,26 @@ class DomeServer:
             raise RequestError("Не указан crisis_name")
         self.simulator.stop_crisis(name)
         return {"success": True, "crisis_name": name}
+
+    async def handle_list_crises(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        return {"success": True, "crises": self.simulator.crisis_catalog(),
+                "active": self.simulator.active_crises(), "reports": self.simulator.crisis_reports()}
+
+    async def handle_start_shift(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        """{"params": {...}} — сброс мира и запуск сценария 90-минутной смены (одинаковый для
+        всех команд). С реальным Оператором: params.simulate_operator = false."""
+        params = data.get("params") or {}
+        if not isinstance(params, dict):
+            raise RequestError("params: ожидался объект")
+        try:
+            self.simulator.start_shift(params=params)
+        except (KeyError, ValueError) as e:
+            raise RequestError(str(e)) from None
+        logger.info("%s started shift (params=%s)", session, params)
+        return {"success": True}
+
+    async def handle_shift_report(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        return {"success": True, "report": self.simulator.shift_report()}
 
     async def handle_time_control(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
         action = data.get("action")

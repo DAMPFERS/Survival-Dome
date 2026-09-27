@@ -16,8 +16,16 @@ from dome_simulator import create_dome_simulator
 @pytest.fixture
 def stepped_simulator():
     """Симулятор без фонового потока с фиксированным seed — для детерминированных
-    тестов через sim.step(). Один шаг = 4 с симуляции = 4 игровые минуты."""
-    return create_dome_simulator(tick_interval=4.0, time_scale=1.0, seed=12345)
+    юнит-тестов узлов через sim.step(). Прежняя модель времени (legacy): один шаг =
+    4 с симуляции = 4 игровые минуты; правила зависимостей выключены — узлы независимы."""
+    return create_dome_simulator(tick_interval=4.0, time_scale=1.0, seed=12345, time_model="legacy", rules=False)
+
+
+@pytest.fixture
+def dome():
+    """Полный купол по умолчанию: гибридное время (сутки 3 ч, физика 1:1),
+    правила зависимостей, автоматика и каталог кризисов. Шаг 4 с."""
+    return create_dome_simulator(tick_interval=4.0, time_scale=1.0, seed=777)
 
 
 @pytest.fixture

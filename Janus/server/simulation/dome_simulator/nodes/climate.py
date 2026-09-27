@@ -32,7 +32,7 @@ class ClimateSensor(SensorNode):
 
     TEMP_SIGMA, HUM_SIGMA, CO2_SIGMA = 0.1, 0.8, 12.0
 
-    def __init__(self, node_id: str, zone: str = "main", glitch_rate_per_hour: float = 0.01,
+    def __init__(self, node_id: str, zone: str = "FABLAB", glitch_rate_per_hour: float = 0.01,
                  seed: Optional[int] = None) -> None:
         super().__init__(node_id, glitch_rate_per_hour, seed)
         self.zone = zone
@@ -70,10 +70,12 @@ class ClimateSensorExtra(ClimateSensor):
     Избыточный датчик: меряет тот же воздух, но с инерцией (reading_delay_s)
     и медленно накапливающимся дрейфом калибровки. Сравнение с основным
     датчиком — способ заметить неисправность.
+    Кризисный вход control_co2_drift_ppm_min — ускоренный дрейф CO2 (К12);
+    накопленный дрейф виден в drift_co2_ppm и снижает confidence.
     """
     title = "Дополнительный датчик климата"
 
-    def __init__(self, node_id: str, zone: str = "main", reading_delay_s: float = 900.0,
+    def __init__(self, node_id: str, zone: str = "FABLAB", reading_delay_s: float = 900.0,
                  drift_rate_c_per_day: float = 0.15, glitch_rate_per_hour: float = 0.02,
                  seed: Optional[int] = None) -> None:
         super().__init__(node_id, zone, glitch_rate_per_hour, seed)
@@ -86,7 +88,7 @@ class ClimateSensorExtra(ClimateSensor):
     def initial_state(self) -> dict[str, Any]:
         state = super().initial_state()
         state.update(reading_delay_s=self.reading_delay_s, drift_temp_c=0.0,
-                     drift_humidity_pct=0.0, drift_co2_ppm=0.0)
+                     drift_humidity_pct=0.0, drift_co2_ppm=0.0, control_co2_drift_ppm_min=0.0)
         return state
 
     def true_values(self, gdt: float) -> tuple[float, float, float]:
@@ -102,6 +104,7 @@ class ClimateSensorExtra(ClimateSensor):
         self._drift[0] += self._drift_sign * rate * days + self.noise(0.002)
         self._drift[1] += self._drift_sign * rate * 3.0 * days
         self._drift[2] += self._drift_sign * rate * 50.0 * days
+        self._drift[2] += float(node.get("control_co2_drift_ppm_min") or 0.0) * gdt / 60.0
         drift_t, drift_h, drift_c = self._drift
         m = super().measure(gdt, node, noise_k)
         m["temperature_c"] = round(m["temperature_c"] + drift_t, 2)
@@ -114,7 +117,8 @@ class ClimateSensorExtra(ClimateSensor):
     def sensor_condition(self, gdt, node):
         state, confidence, noise_k = super().sensor_condition(gdt, node)
         if state == "OK":  # чем больше дрейф — тем ниже достоверность
-            confidence = round(clamp(confidence - abs(node["drift_temp_c"]) * 0.2, 0.2, 1.0), 3)
+            confidence = round(clamp(confidence - abs(node["drift_temp_c"]) * 0.2
+                                     - abs(node["drift_co2_ppm"]) / 2500.0, 0.1, 1.0), 3)
         return state, confidence, noise_k
 
     @control("recalibrate", "calibrate")
@@ -129,35 +133,42 @@ class ClimateSensorExtra(ClimateSensor):
 
 @register_node_type("air_quality_sensor")
 class AirQualitySensor(SensorNode):
-    """После включения MOX-сенсору нужен прогрев — первые 2 игровых часа достоверность ниже."""
+    """
+    MOX-сенсор зоны (по умолчанию FABLAB): CO, индекс VOC и опасные газы
+    внутри купола (chem_ppm — аммиак и др., проникшие снаружи, К5).
+    После включения сенсору нужен прогрев (warmup_s) — достоверность ниже.
+    """
     title = "Датчик качества воздуха CO/VOC"
     system = "Климат"
     category = "climate"
 
-    WARMUP_S = 2 * 3600.0
-
-    def __init__(self, node_id: str, glitch_rate_per_hour: float = 0.01, seed: Optional[int] = None) -> None:
+    def __init__(self, node_id: str, zone: str = "FABLAB", warmup_s: float = 900.0,
+                 glitch_rate_per_hour: float = 0.01, seed: Optional[int] = None) -> None:
         super().__init__(node_id, glitch_rate_per_hour, seed)
+        self.zone = zone
+        self.warmup_s = warmup_s
         self._uptime_s = 0.0
 
     def initial_state(self) -> dict[str, Any]:
-        return {"co_ppm": 0.0, "voc_index": 100, "warming_up": True}
+        return {"zone": self.zone, "co_ppm": 0.0, "voc_index": 100, "chem_ppm": 0.0, "warming_up": True}
 
     def measure(self, gdt: float, node: dict[str, Any], noise_k: float) -> dict[str, Any]:
         self._uptime_s += gdt
-        warming = self._uptime_s < self.WARMUP_S
+        warming = self._uptime_s < self.warmup_s
         k = noise_k * (3.0 if warming else 1.0)
-        i = self.env.indoor
+        air = self.env.zone_air(self.zone)
+        chem = self.env.indoor.chem_ppm if self.zone.upper() in ("FABLAB", "MAIN") else 0.0
         return {
-            "co_ppm": round(max(0.0, i.co_ppm + self.noise(0.15 * k)), 2),
-            "voc_index": int(clamp(i.voc_index + self.noise(4.0 * k), 1, 500)),
+            "co_ppm": round(max(0.0, air.co_ppm + self.noise(0.15 * k)), 2),
+            "voc_index": int(clamp(air.voc_index + self.noise(4.0 * k), 1, 500)),
+            "chem_ppm": round(max(0.0, chem + self.noise(0.05 * k)), 2),
             "warming_up": warming,
         }
 
     def sensor_condition(self, gdt, node):
         state, confidence, noise_k = super().sensor_condition(gdt, node)
-        if state == "OK" and self._uptime_s < self.WARMUP_S:
-            confidence = round(0.5 + 0.45 * self._uptime_s / self.WARMUP_S, 3)
+        if state == "OK" and self._uptime_s < self.warmup_s:
+            confidence = round(0.5 + 0.45 * self._uptime_s / self.warmup_s, 3)
         return state, confidence, noise_k
 
 
@@ -167,10 +178,18 @@ class AirQualitySensor(SensorNode):
 
 @register_node_type("fume_extraction")
 class FumeExtraction(SandboxNode):
-    """Вход для правил: control_powered (линия 6 щитка)."""
+    """
+    Вход для правил: control_powered (линия 6 щитка).
+    Засор фильтра (control_filter_clog_pct, пыль от фрезеровки текстолита)
+    нагружает двигатель: при сильном засоре он перегревается (> 85 °C) и
+    срабатывает тепловая защита (№17). Продувка фильтра — физическое действие
+    clean_filter. Остывание 90 → 60 °C — около 4 минут.
+    """
     title = "Вытяжная вентиляция FabLab"
     system = "Вентиляция"
     category = "ventilation"
+
+    MOTOR_TAU_S = 400.0
 
     def __init__(self, node_id: str, rated_w: float = 95.0, nominal_rpm: float = 2800.0,
                  fault_rate_per_hour: float = 0.003, seed: Optional[int] = None) -> None:
@@ -185,16 +204,19 @@ class FumeExtraction(SandboxNode):
             "enabled": True,
             "power_w": 0.0,
             "fan_rpm": 0.0,
+            "airflow_pct": 0.0,
             "motor_state": "OK",       # OK | OVERHEAT | STALLED
             "motor_temp_c": 22.0,
             "alarm": False,
             "alarm_code": None,
             "control_powered": True,
+            "control_filter_clog_pct": 10.0,
         }
 
     def simulate(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
         motor_state, alarm_code = node["motor_state"], node["alarm_code"]
         running = node["enabled"] and node["control_powered"] and motor_state == "OK"
+        clog = clamp(float(node.get("control_filter_clog_pct") or 0.0), 0.0, 100.0) / 100.0
 
         if running:
             self._bearing_wear += gdt / (400 * 3600.0)
@@ -205,18 +227,22 @@ class FumeExtraction(SandboxNode):
                 running = False
 
         ambient = self.env.indoor.temperature_c
-        load = 1.0 + 0.3 * self._bearing_wear
+        load = (1.0 + 0.3 * self._bearing_wear) * (1.0 + 1.6 * clog ** 2)
         target_temp = ambient + (35.0 * load if running else 0.0)
-        motor_temp = relax(node["motor_temp_c"], target_temp, 1200, gdt) + self.noise(0.2)
+        motor_temp = relax(node["motor_temp_c"], target_temp, self.MOTOR_TAU_S, gdt) + self.noise(0.2)
         if running and motor_temp > 85.0:
             motor_state, alarm_code, running = "OVERHEAT", "MOTOR_OVERHEAT", False
-            self.emit("fume_extraction.alarm", Severity.WARNING, alarm_code=alarm_code)
+            self.emit("fume_extraction.alarm", Severity.WARNING, alarm_code=alarm_code,
+                      motor_temp_c=round(motor_temp, 1))
 
-        rpm = self.nominal_rpm * (1.0 - 0.1 * self._bearing_wear) + self.noise(15.0) if running else 0.0
-        power = self.rated_w * load * (1.0 + self.noise(0.02)) if running else 0.0
+        rpm = self.nominal_rpm * (1.0 - 0.1 * self._bearing_wear) * (1.0 - 0.15 * clog) + self.noise(15.0) \
+            if running else 0.0
+        power = self.rated_w * (1.0 + 0.3 * self._bearing_wear) * (1.0 + 0.25 * clog) * (1.0 + self.noise(0.02)) \
+            if running else 0.0
         return {
             "power_w": round(power, 1),
             "fan_rpm": round(max(0.0, rpm)),
+            "airflow_pct": round(100.0 * (1.0 - clog ** 1.5) if running else 0.0, 1),
             "motor_state": motor_state,
             "motor_temp_c": round(motor_temp, 1),
             "alarm": alarm_code is not None,
@@ -239,6 +265,12 @@ class FumeExtraction(SandboxNode):
             self._bearing_wear *= 0.5  # сброс + ручной прокрут вала
         return {"motor_state": "OK", "alarm": False, "alarm_code": None}
 
+    @control("clean_filter", physical=True)
+    def _clean_filter(self, node, value):
+        """Продувка/замена фильтра вытяжки (Оператор)."""
+        self.emit("fume_extraction.filter_cleaned", Severity.INFO)
+        return {"control_filter_clog_pct": 5.0}
+
 
 # ---------------------------------------------------------------------------
 # 8.1 Приточная вентиляция / рекуператор
@@ -252,7 +284,9 @@ class SupplyVentilation(SandboxNode):
     """
     Параметры приточного воздуха считаются из наружного/внутреннего воздуха
     по режиму и КПД рекуператора. Фильтр забивается пропорционально
-    расходу наружного воздуха и запылённости снаружи.
+    расходу наружного воздуха и запылённости снаружи: в пыльную бурю
+    (dust_level ≈ 1) режим FRESH_AIR забивает фильтр примерно за 10 минут (К2).
+    fresh_air_m3_h — сколько наружного воздуха подаётся в купол (для правил).
     """
     title = "Приточная вентиляция / рекуператор"
     system = "Вентиляция"
@@ -270,6 +304,7 @@ class SupplyVentilation(SandboxNode):
     def initial_state(self) -> dict[str, Any]:
         return {
             "airflow_m3_h": 0.0,
+            "fresh_air_m3_h": 0.0,
             "supply_temp_c": 20.0,
             "supply_humidity_pct": 45.0,
             "filter_clog_pct": 12.0,
@@ -305,7 +340,9 @@ class SupplyVentilation(SandboxNode):
             fresh_t = outdoor.temperature_c + self.recuperator_efficiency * (indoor.temperature_c - outdoor.temperature_c)
             supply_t = fresh_share * fresh_t + (1 - fresh_share) * indoor.temperature_c
             supply_h = fresh_share * clamp(outdoor.humidity_pct * 0.8, 10, 100) + (1 - fresh_share) * indoor.humidity_pct
-            clog += fresh_share * airflow / self.nominal_airflow_m3_h * (0.4 + 3.0 * outdoor.dust_level) * gdt / 3600.0
+            dust = outdoor.dust_level
+            clog_rate_pct_h = 0.4 + 3.0 * dust + 1400.0 * max(0.0, dust - 0.6)
+            clog += fresh_share * airflow / self.nominal_airflow_m3_h * clog_rate_pct_h * gdt / 3600.0
             power = self.rated_w * speed ** 3 * (1.0 + 0.3 * clog / 100.0) + 5.0
         else:
             airflow, power = 0.0, 0.0
@@ -319,6 +356,7 @@ class SupplyVentilation(SandboxNode):
 
         return {
             "airflow_m3_h": round(max(0.0, airflow), 1),
+            "fresh_air_m3_h": round(max(0.0, airflow) * fresh_share, 1),
             "supply_temp_c": round(supply_t + self.noise(0.1), 1),
             "supply_humidity_pct": round(clamp(supply_h + self.noise(0.5), 0, 100), 1),
             "filter_clog_pct": round(clog, 2),
@@ -496,6 +534,10 @@ class ThermalInsulation(SandboxNode):
     Режимы-«помехи» из реестра:
         random_rpm_mode — вентиляторам постоянно выставляются случайные обороты;
         pwm_distortion  — команды set_fan_pwm искажаются случайным значением.
+
+    Шина опроса (Д16): crc_errors, poll_interval_ms, set_poll_interval.
+    Кризисный вход control_bus_collision — конфликт адресов (№22): при опросе
+    чаще 500 мс 20–40 % значений приходят пустыми (null), растут CRC-ошибки.
     """
     title = "Теплоизоляционный блок"
     system = "МС-ТЮК"
@@ -526,6 +568,9 @@ class ThermalInsulation(SandboxNode):
             "pressure_outside_pa": round(base_pa, 1),
             "random_rpm_mode": False,
             "pwm_distortion": False,
+            "poll_interval_ms": 200,
+            "crc_errors": 0,
+            "control_bus_collision": False,
         }
 
     def _rpm(self, pwm: int, current: float, gdt: float) -> float:
@@ -558,7 +603,7 @@ class ThermalInsulation(SandboxNode):
         inside_voc = relax(node["voc_inside"], target_voc, 900 / exchange, gdt)
         overpressure = 0.0 if lid_open else 35.0 * (flow_in - 0.8 * flow_out)
 
-        return {
+        u = {
             "fans_in_pwm": pwm_in,
             "fans_out_pwm": pwm_out,
             "fans_in_rpm": rpm_in,
@@ -570,6 +615,22 @@ class ThermalInsulation(SandboxNode):
             "pressure_inside_pa": [round(outside_pa + overpressure + self.noise(0.8), 1) for _ in range(2)],
             "pressure_outside_pa": round(outside_pa + self.noise(0.8), 1),
         }
+        if self.bus_collision_active(node):
+            # конфликт адресов: часть ответов не проходит проверку CRC
+            # (пропуски значений в телеметрии добавляет слой телеметрии, см. кризис №22)
+            loss = self.rng.uniform(0.2, 0.4)
+            polls = gdt * 1000.0 / max(node["poll_interval_ms"], 1)
+            u["crc_errors"] = int(node["crc_errors"] + max(1, round(polls * loss * 0.05)))
+        return u
+
+    @staticmethod
+    def bus_collision_active(node: dict[str, Any]) -> bool:
+        return bool(node.get("control_bus_collision")) and node.get("poll_interval_ms", 0) < 500
+
+    @control("set_poll_interval")
+    def _set_poll_interval(self, node, value):
+        """Период опроса шины, мс (50..5000)."""
+        return {"poll_interval_ms": int(parse_number(value, 50, 5000, "Период опроса, мс"))}
 
     # ---- управление ----
 

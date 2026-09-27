@@ -1,7 +1,7 @@
 # dome_simulator/nodes/comms.py
 """
 Связь и вычисления (раздел 9 реестра dome_sandbox_nodes.md):
-radio, backup_comms, edge_compute.
+radio, backup_comms, edge_compute, network_link (Д12).
 """
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ class Radio(SandboxNode):
         distance = abs(node["frequency_mhz"] - center)
         interference_db = 25.0 * math.exp(-(distance / 0.6) ** 2)
         weather_db = 1.5 * min(o.precipitation_mm_h, 8.0) + 0.3 * max(0.0, o.wind_speed_ms - 10.0)
-        noise_dbm = -120.0 + interference_db + weather_db + self.noise(1.0)
+        noise_dbm = -120.0 + interference_db + weather_db + self.env.external.radio_noise_db + self.noise(1.0)
 
         snr = self.SIGNAL_DBM + self._fading.step(gdt) - noise_dbm
         max_rate, min_snr = RADIO_PROTOCOLS[node["protocol"]]
@@ -147,6 +147,10 @@ class BackupComms(SandboxNode):
         quality = qualities[channel]
         if channel == "SATELLITE":
             quality -= 0.3 * o.cloud_cover ** 2 + 0.05 * min(o.precipitation_mm_h, 6.0)
+            if self.env.external.solar_flare:
+                quality = 0.05  # геомагнитная буря: спутниковый канал недоступен (К9)
+        elif channel == "LORA":
+            quality -= min(0.5, self.env.external.radio_noise_db / 60.0)
         elif channel == "MESH":
             if self._mesh_outage_s > 0:
                 self._mesh_outage_s -= gdt
@@ -205,12 +209,20 @@ class EdgeCompute(SandboxNode):
     Нагрузка — по суточному профилю работы агентов + шум. Память медленно
     «утекает» до перезагрузки. Сервисы изредка падают (DEGRADED).
     Перегрев (>85 °C) — троттлинг и состояние OVERHEAT.
+
+    Питание — выход инвертора (control_powered): после блэкаута узел грузится
+    3 минуты (К3). Кризисный вход control_memory_leak_pct_min — утечка памяти в
+    telemetry_collector (К8): < 15 % — сборщик телеметрии падает (телеметрия
+    обслуживаемых узлов замирает), < 5 % — падает agent_runtime. Перезапуск
+    telemetry_collector освобождает память и устраняет утечку.
+    clock_offset_s — сдвиг часов сборщика (№20), sync_time — синхронизация NTP.
     """
     title = "Локальный вычислительный узел / edge-сервер"
     system = "Вычисления"
     category = "compute"
 
     REBOOT_S = 180.0
+    COLLECTOR_FAIL_PCT, RUNTIME_FAIL_PCT = 15.0, 5.0
 
     def __init__(self, node_id: str, service_failure_rate_per_hour: float = 0.01,
                  seed: Optional[int] = None) -> None:
@@ -231,7 +243,9 @@ class EdgeCompute(SandboxNode):
             "state": "ONLINE",             # ONLINE | DEGRADED | OFFLINE | OVERHEAT
             "load_limit_pct": 100.0,
             "uptime_h": 0.0,
+            "clock_offset_s": 0.0,
             "control_powered": True,
+            "control_memory_leak_pct_min": 0.0,
         }
 
     def simulate(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
@@ -277,7 +291,15 @@ class EdgeCompute(SandboxNode):
         if throttled:
             cpu, gpu = cpu * 0.6, gpu * 0.6
 
-        free_mem = clamp(node["free_memory_pct"] - 0.8 * gdt / 3600.0 + self.noise(0.3), 3.0, 95.0)
+        leak = float(node.get("control_memory_leak_pct_min") or 0.0)
+        free_mem = clamp(node["free_memory_pct"] - 0.8 * gdt / 3600.0 - leak * gdt / 60.0 + self.noise(0.3),
+                         1.0, 95.0)
+        if free_mem < self.COLLECTOR_FAIL_PCT and services["telemetry_collector"] == "RUNNING":
+            services["telemetry_collector"] = "FAILED"
+            self.emit("edge.service_failed", Severity.CRITICAL, service="telemetry_collector", reason="OUT_OF_MEMORY")
+        if free_mem < self.RUNTIME_FAIL_PCT and services["agent_runtime"] == "RUNNING":
+            services["agent_runtime"] = "FAILED"
+            self.emit("edge.service_failed", Severity.CRITICAL, service="agent_runtime", reason="OUT_OF_MEMORY")
 
         if throttled:
             state = "OVERHEAT"
@@ -308,7 +330,11 @@ class EdgeCompute(SandboxNode):
         services = dict(node["services"])
         services[service] = "RESTARTING"
         self._restarting[service] = 60.0
-        return {"services": services}
+        u: dict[str, Any] = {"services": services}
+        if service == "telemetry_collector":
+            # утечка была в сборщике — перезапуск освобождает его память
+            u.update(free_memory_pct=round(max(node["free_memory_pct"], 68.0), 1), control_memory_leak_pct_min=0.0)
+        return u
 
     @control("limit_load", "set_load_limit")
     def _limit_load(self, node, value):
@@ -319,4 +345,112 @@ class EdgeCompute(SandboxNode):
         self._reboot_remaining_s = self.REBOOT_S
         self._restarting.clear()
         return {"state": "OFFLINE", "services": {s: "STOPPED" for s in EDGE_SERVICES},
-                "cpu_load_pct": 0.0, "gpu_load_pct": 0.0}
+                "cpu_load_pct": 0.0, "gpu_load_pct": 0.0, "control_memory_leak_pct_min": 0.0,
+                "free_memory_pct": 85.0}
+
+    @control("sync_time", "ntp_sync")
+    def _sync_time(self, node, value):
+        """Синхронизация часов сборщика телеметрии с NTP (№20)."""
+        if node["state"] == "OFFLINE":
+            raise ControlError("Узел offline")
+        return {"clock_offset_s": 0.0}
+
+
+# ---------------------------------------------------------------------------
+# Д12 Сетевой канал купола: медиаконвертер (SFP), патчкорд щита, резервный путь
+# ---------------------------------------------------------------------------
+
+NETWORK_PATHS = ("MAIN", "RESERVE")
+
+
+@register_node_type("network_link")
+class NetworkLink(SandboxNode):
+    """
+    Канал между куполом и API песочницы (через него идут команды агента и
+    телеметрия) и патчкорд от управляющего компьютера к умному щиту.
+
+    MAIN — оптика через медиаконвертер с SFP-модулем, RESERVE — резервный путь.
+    Кризисные входы: control_sfp_degradation (0..1 — старение лазера SFP, падает
+    rx_power_dbm), control_main_link_down (обрыв основного линка — выставляет
+    кризис №23), control_panel_patchcord_fault (повреждён патчкорд щита, №30).
+
+    Физические действия Оператора: switch_path (переключить канал),
+    replace_patchcord (замена патчкорда щита, ~1 мин).
+    """
+    title = "Сетевой канал купола (медиаконвертер / патчкорд щита)"
+    system = "Связь"
+    category = "comms"
+
+    PATCHCORD_S = 60.0
+
+    def __init__(self, node_id: str, seed: Optional[int] = None) -> None:
+        super().__init__(node_id, seed)
+        self._patch_s = 0.0
+
+    def initial_state(self) -> dict[str, Any]:
+        return {
+            "active_path": "MAIN",
+            "link_state": "UP",            # UP | DOWN
+            "link_flaps": 0,
+            "rx_power_dbm": -7.5,
+            "reserve_link_state": "UP",
+            "packet_loss_pct": 0.0,
+            "panel_link_state": "UP",      # патчкорд к умному щиту
+            "patchcord_replacing": False,
+            "control_sfp_degradation": 0.0,
+            "control_main_link_down": False,
+            "control_panel_patchcord_fault": False,
+        }
+
+    def simulate(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
+        u: dict[str, Any] = {}
+        degradation = clamp(float(node.get("control_sfp_degradation") or 0.0), 0.0, 1.0)
+        rx = -7.5 - 14.0 * degradation + self.noise(0.15)
+        main_down = bool(node.get("control_main_link_down"))
+        path = node["active_path"]
+        link_up = not (path == "MAIN" and main_down)
+        state = "UP" if link_up else "DOWN"
+        if state == "DOWN" and node["link_state"] == "UP":
+            u["link_flaps"] = node["link_flaps"] + 1
+            self.emit("network.link_down", Severity.CRITICAL, path=path, rx_power_dbm=round(rx, 1))
+        elif state == "UP" and node["link_state"] == "DOWN":
+            self.emit("network.link_up", Severity.INFO, path=path)
+        loss = 0.0 if not link_up else (clamp((degradation - 0.4) * 8.0, 0.0, 5.0) if path == "MAIN" else 0.1)
+
+        if self._patch_s > 0:
+            self._patch_s -= gdt
+            if self._patch_s <= 0:
+                u.update(control_panel_patchcord_fault=False, patchcord_replacing=False)
+                self.emit("network.patchcord_replaced", Severity.INFO)
+        panel_fault = u.get("control_panel_patchcord_fault", node["control_panel_patchcord_fault"])
+        panel_state = "DOWN" if panel_fault or u.get("patchcord_replacing", node["patchcord_replacing"]) else "UP"
+        if panel_state != node["panel_link_state"]:
+            self.emit("network.panel_link", Severity.CRITICAL if panel_state == "DOWN" else Severity.INFO,
+                      state=panel_state)
+
+        u.update({
+            "link_state": state,
+            "rx_power_dbm": round(rx, 2),
+            "packet_loss_pct": round(loss, 2),
+            "panel_link_state": panel_state,
+        })
+        return u
+
+    def agent_link_up(self, node: dict[str, Any]) -> bool:
+        return node["link_state"] == "UP"
+
+    @control("switch_path", physical=True)
+    def _switch_path(self, node, value):
+        """Переключить канал MAIN/RESERVE (Оператор у стойки). Без value — на другой."""
+        if value is None:
+            target = "RESERVE" if node["active_path"] == "MAIN" else "MAIN"
+        else:
+            target = parse_choice(value, NETWORK_PATHS, "Канал")
+        self.emit("network.path_switched", Severity.INFO, path=target)
+        return {"active_path": target}
+
+    @control("replace_patchcord", physical=True)
+    def _replace_patchcord(self, node, value):
+        """Замена патчкорда между управляющим компьютером и щитом (~1 мин)."""
+        self._patch_s = self.PATCHCORD_S
+        return {"patchcord_replacing": True, "panel_link_state": "DOWN"}

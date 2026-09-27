@@ -20,9 +20,9 @@ from .sandbox import ControlError, SandboxNode, SensorNode, control, parse_bool,
 @register_node_type("smoke_detector")
 class SmokeDetector(SensorNode):
     """
-    Оптический датчик. Тревога фиксируется (latch) и держится до RESET_ALARM.
-    Редкие ложные срабатывания — пыль/пар (false_alarm_rate_per_hour).
-    Дым берётся из env.indoor.smoke_density (его будут поднимать кризисы).
+    Оптический датчик зоны (FABLAB, STORAGE, ...). Тревога фиксируется (latch)
+    и держится до RESET_ALARM. Редкие ложные срабатывания — пыль/пар
+    (false_alarm_rate_per_hour). Дым берётся из воздуха своей зоны (Д2).
     """
     title = "Датчик дыма / пожарный датчик"
     system = "Пожарная безопасность"
@@ -42,7 +42,8 @@ class SmokeDetector(SensorNode):
                 "alarm_state": "NORMAL", "false_alarm_suspected": False}
 
     def measure(self, gdt: float, node: dict[str, Any], noise_k: float) -> dict[str, Any]:
-        density = self.env.indoor.smoke_density
+        density = self.env.zone_air(self.zone).smoke_density
+        true_density = density
         false_alarm = False
         if self._false_smoke_s > 0:
             self._false_smoke_s -= gdt
@@ -63,7 +64,7 @@ class SmokeDetector(SensorNode):
             "smoke_detected": detected,
             "obscuration_pct": round(measured * 100, 2),
             "alarm_state": alarm,
-            "false_alarm_suspected": false_alarm and self.env.indoor.smoke_density < self.THRESHOLD
+            "false_alarm_suspected": false_alarm and true_density < self.THRESHOLD
                                      and node["confidence"] < 0.9,
         }
 
@@ -84,20 +85,31 @@ FIRE_ZONES = ("FABLAB", "LIVING", "STORAGE", "POWER_ROOM")
 class FireSuppression(SandboxNode):
     """
     Спринклерная система. В дежурном режиме жокей-насос держит давление
-    ~6 бар, компенсируя медленную утечку. При пуске зоны давление падает,
-    клапан зоны открыт. Автопуск от датчиков дыма появится с правилами —
-    вход control_auto_trigger_zone (зона, которую требует потушить автоматика).
+    ~6 бар, забирая воду из общего резервуара. При пуске зоны давление падает,
+    клапан зоны открыт, расход воды ~20 л/мин; цикл пуска — 5 минут, затем
+    клапан закрывается и система возвращается в дежурный режим.
+
+    Входы правил: control_auto_trigger_zone (зона, которую требует потушить
+    автоматика купола), control_water_available_l (вода в резервуаре — при
+    её нехватке жокей-насос не держит давление: FAULT LOW_PRESSURE, К6).
+    discharge_l_min — текущий расход воды (для правила «пожаротушение → резервуар»).
     """
     title = "Система пожаротушения / спринклеры"
     system = "Пожарная безопасность"
     category = "safety"
 
     STANDBY_BAR = 6.0
+    DISCHARGE_L_MIN = 20.0
+    CYCLE_S = 300.0
+    MIN_WATER_L = 150.0
+    RECOVER_S = 600.0
 
     def __init__(self, node_id: str, false_trigger_rate_per_hour: float = 0.003,
                  seed: Optional[int] = None) -> None:
         super().__init__(node_id, seed)
         self.false_trigger_rate_per_hour = false_trigger_rate_per_hour
+        self._active_s = 0.0
+        self._recover_s = 0.0   # после цикла жокей-насос восстанавливает давление
 
     def initial_state(self) -> dict[str, Any]:
         return {
@@ -110,7 +122,10 @@ class FireSuppression(SandboxNode):
             "automation_blocked": False,
             "alarm": False,
             "fault_code": None,
+            "discharge_l_min": 0.0,
             "control_auto_trigger_zone": None,
+            "control_water_available_l": None,
+            "control_supply_ok": True,
         }
 
     def simulate(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
@@ -120,6 +135,7 @@ class FireSuppression(SandboxNode):
         auto_zone = node["control_auto_trigger_zone"]
         if auto_zone and state == "READY" and not node["automation_blocked"]:
             state, zone = "ACTIVE", auto_zone
+            self._active_s = 0.0
             u.update(alarm=True, valves={z: ("OPEN" if z == zone else "CLOSED") for z in FIRE_ZONES})
             self.emit("fire_suppression.activated", Severity.CRITICAL, zone=zone, source="auto")
 
@@ -128,14 +144,30 @@ class FireSuppression(SandboxNode):
             u["false_trigger_count"] = node["false_trigger_count"] + 1
             self.emit("fire_suppression.false_trigger", Severity.WARNING)
 
+        water = node.get("control_water_available_l")
+        # подпитка жокей-насоса — от насосной станции и резервуара
+        water_ok = (water is None or float(water) >= self.MIN_WATER_L) and node.get("control_supply_ok", True) is not False
+        if state == "ACTIVE":
+            self._active_s += gdt
+            if self._active_s >= self.CYCLE_S or (water is not None and float(water) <= 5.0):
+                state = "DISABLED" if node["automation_blocked"] else "READY"
+                self._recover_s = self.RECOVER_S
+                self.emit("fire_suppression.cycle_done", Severity.INFO, zone=zone)
+                zone = None
+                u["valves"] = {z: "CLOSED" for z in FIRE_ZONES}
         if state == "ACTIVE":
             pressure = relax(node["pressure_bar"], 2.5, 300, gdt)
-        else:
+        elif water_ok:
             pressure = relax(node["pressure_bar"], self.STANDBY_BAR, 600, gdt)
+        else:
+            pressure = relax(node["pressure_bar"], 1.5, 600, gdt)  # жокей-насосу нечего качать
         pressure += self.noise(0.02)
+        u["discharge_l_min"] = self.DISCHARGE_L_MIN if state == "ACTIVE" else 0.0
 
         fault_code = node["fault_code"]
-        if state != "ACTIVE" and pressure < 4.0 and fault_code is None:
+        if self._recover_s > 0 and state != "ACTIVE":
+            self._recover_s = 0.0 if pressure > 5.5 else self._recover_s - gdt
+        if state != "ACTIVE" and pressure < 4.0 and fault_code is None and self._recover_s <= 0:
             fault_code = "LOW_PRESSURE"
             state = "FAULT"
             self.emit("fire_suppression.fault", Severity.WARNING, fault_code=fault_code)
@@ -157,6 +189,7 @@ class FireSuppression(SandboxNode):
         zone = parse_choice(value, FIRE_ZONES, "Зона пожаротушения")
         if node["state"] == "FAULT":
             raise ControlError(f"Система в аварии ({node['fault_code']})")
+        self._active_s = 0.0
         self.emit("fire_suppression.activated", Severity.CRITICAL, zone=zone, source="manual")
         return {"state": "ACTIVE", "active_zone": zone, "alarm": True, "ready": False,
                 "valves": {z: ("OPEN" if z == zone else "CLOSED") for z in FIRE_ZONES}}
@@ -213,8 +246,11 @@ class AccessControl(SandboxNode):
         self.intrusion_rate_per_hour = intrusion_rate_per_hour
 
     def initial_state(self) -> dict[str, Any]:
+        # В рабочее время двери FabLab и склада не заперты (люди ходят), шлюз и серверная — заперты
+        unlocked = ("FABLAB", "STORAGE")
         return {
-            "doors": {d: {"state": "CLOSED", "locked": True, "lock_battery_pct": round(self.rng.uniform(70, 100), 1)}
+            "doors": {d: {"state": "CLOSED", "locked": d not in unlocked,
+                          "lock_battery_pct": round(self.rng.uniform(70, 100), 1)}
                       for d in DOORS},
             "passage_events": [],
             "system_state": "NORMAL",      # NORMAL | ALARM | LOCKDOWN

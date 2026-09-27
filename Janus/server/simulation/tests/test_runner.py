@@ -25,7 +25,9 @@ CATEGORIES = {
     "state": "test_state_store.py",
     "nodes": "test_nodes.py",
     "integration": "test_integration.py",
-    # "deps" и "crises" вернутся вместе с правилами/кризисами для узлов песочницы
+    "deps": "test_dependencies.py",
+    "crises": "test_crises.py",
+    "shift": "test_shift.py",
     "time": "test_time_control.py",
     "threads": "test_thread_safety.py",
 }

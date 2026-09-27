@@ -20,8 +20,15 @@ SandboxNode берёт на себя всё, что одинаково у все
 процесса, «истинный» износ и т.п.), хранится в атрибутах инстанса.
 Всё, что должно быть видно или переживать save/load snapshot, — в StateStore.
 
-Поля control_* — входы для правил зависимостей и кризисов (следующий этап):
-узел читает их, но сам не меняет.
+Поля control_* — входы для правил зависимостей и кризисов: узел читает их,
+но сам не меняет (кроме сброса аварий собственными командами, например reset_error).
+
+Время: simulate() получает шаг в секундах времени УСТРОЙСТВА (env.device_dt) —
+при гибридной модели это реальное время 1:1, суточный цикл берётся из self.hour.
+
+Физические действия (@control(..., physical=True)) выполняет Оператор руками в
+куполе (замена патчкорда, чистка фильтра, осмотр кабеля). ИИ-агенту они
+недоступны — фасад Simulator.control отклоняет их при origin="agent".
 """
 from __future__ import annotations
 
@@ -39,11 +46,13 @@ class ControlError(ValueError):
     """Недопустимое управляющее воздействие (неизвестное действие или значение)."""
 
 
-def control(*names: str) -> Callable[[Callable], Callable]:
+def control(*names: str, physical: bool = False) -> Callable[[Callable], Callable]:
     """Помечает метод узла как обработчик управляющих воздействий с именами names.
-    Имена сравниваются без учёта регистра: START_CELL_BALANCING == start_cell_balancing."""
+    Имена сравниваются без учёта регистра: START_CELL_BALANCING == start_cell_balancing.
+    physical=True — действие выполняет Оператор физически (агенту недоступно)."""
     def decorator(fn: Callable) -> Callable:
         fn._control_names = tuple(n.lower() for n in names)
+        fn._control_physical = physical
         return fn
     return decorator
 
@@ -54,21 +63,25 @@ class SandboxNode(BaseNode):
 
     _controls: dict[str, str] = {}             # любое имя (включая алиасы) -> метод
     _control_aliases: dict[str, list[str]] = {}  # основное имя -> алиасы
+    _physical: frozenset = frozenset()           # основные имена физических действий Оператора
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         controls: dict[str, str] = {}
         methods: dict[str, tuple[str, ...]] = {}
+        physical: dict[str, bool] = {}
         for klass in reversed(cls.__mro__):
             for attr, fn in vars(klass).items():
                 names = getattr(fn, "_control_names", ())
                 if names:
                     methods[attr] = names  # переопределение в подклассе заменяет набор имён
+                    physical[attr] = getattr(fn, "_control_physical", False)
         for attr, names in methods.items():
             for name in names:
                 controls[name] = attr
         cls._controls = controls
         cls._control_aliases = {names[0]: list(names[1:]) for names in methods.values()}
+        cls._physical = frozenset(names[0] for attr, names in methods.items() if physical[attr])
 
     def __init__(self, node_id: str, seed: Optional[int] = None) -> None:
         super().__init__(node_id)
@@ -83,7 +96,9 @@ class SandboxNode(BaseNode):
 
     def get_state(self) -> dict[str, Any]:
         state: dict[str, Any] = {"online": True}
-        state.update(self.initial_state())
+        initial = self.initial_state()
+        self.measured_keys = tuple(k for k in initial if not k.startswith("control_"))
+        state.update(initial)
         state["control_override_source"] = None  # None | "real" | "virtual"
         return state
 
@@ -93,7 +108,7 @@ class SandboxNode(BaseNode):
         node = state.get_node(self.node_id)
         if node.get("control_override_source") == "real":
             return []
-        updates = self.simulate(self.env.game_dt(dt), node)
+        updates = self.simulate(self.env.device_dt(dt), node)
         if updates:
             state.update(self.node_id, **updates)
         return self._drain_events()
@@ -116,7 +131,7 @@ class SandboxNode(BaseNode):
 
     def emit(self, event_type: str, severity: Severity = Severity.INFO, **payload: Any) -> None:
         self._events.append(Event(type=event_type, source=self.node_id,
-                                  payload=payload, severity=severity))
+                                  payload=payload, severity=severity, timestamp=self.env.now()))
 
     def noise(self, sigma: float) -> float:
         return self.rng.gauss(0.0, sigma)
@@ -148,6 +163,18 @@ class SandboxNode(BaseNode):
     def control_aliases(cls) -> dict[str, list[str]]:
         return {name: list(aliases) for name, aliases in sorted(cls._control_aliases.items())}
 
+    @classmethod
+    def physical_controls(cls) -> list[str]:
+        """Действия, которые выполняет Оператор руками (агенту недоступны)."""
+        return sorted(cls._physical)
+
+    def real_command(self, store: StateStore, action: str, value: Any = None) -> list[tuple[str, Any]]:
+        """Перевод команды для узла в режиме real в команды реального драйвера.
+        По умолчанию команда уходит на железо как есть. Узлы, у драйверов которых
+        нет части действий (щиток: reset_protection), переопределяют перевод и
+        при необходимости сами обновляют своё состояние в хранилище."""
+        return [(action, value)]
+
     def handle_control(self, store: StateStore, action: str, value: Any = None) -> list[Event]:
         """Выполняет управляющее воздействие. Бросает ControlError при ошибке.
         Вызывается фасадом Simulator под блокировкой тика."""
@@ -175,7 +202,9 @@ class SensorNode(SandboxNode):
     - Редкие самопроизвольные сбои (glitch_rate_per_hour): датчик на 5–40 игровых
       минут становится DEGRADED — шум возрастает, достоверность падает.
     - control_fault: вход для кризисов. Любое непустое значение переводит
-      датчик в FAULT (показания замирают, достоверность ~0).
+      датчик в FAULT (показания замирают, достоверность ~0; в телеметрии — null, Д4).
+    - control_noise_multiplier: вход для кризисов (Д5) — множитель шума показаний
+      (наводки от ШИМ освещения и т.п.).
     """
 
     base_confidence: float = 0.97
@@ -187,7 +216,8 @@ class SensorNode(SandboxNode):
 
     def get_state(self) -> dict[str, Any]:
         state = super().get_state()
-        state.update(sensor_state="OK", confidence=self.base_confidence, control_fault=None)
+        state.update(sensor_state="OK", confidence=self.base_confidence, control_fault=None,
+                     control_noise_multiplier=1.0)
         return state
 
     def sensor_condition(self, gdt: float, node: dict[str, Any]) -> tuple[str, float, float]:
@@ -208,6 +238,7 @@ class SensorNode(SandboxNode):
         if node["sensor_state"] != sensor_state and sensor_state != "OK":
             self.emit("sensor.degraded", Severity.WARNING, sensor_state=sensor_state)
         if sensor_state != "FAULT":
+            noise_k *= float(node.get("control_noise_multiplier") or 1.0)
             updates.update(self.measure(gdt, node, noise_k) or {})
         return updates
 

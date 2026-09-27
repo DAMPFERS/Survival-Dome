@@ -34,7 +34,7 @@ def test_all_registry_nodes_present(stepped_simulator):
     ids = set(stepped_simulator.node_ids())
     expected = {node_id for _, node_id, _ in SANDBOX_NODES}
     assert ids == expected
-    assert len(ids) == 32
+    assert len(ids) == 35  # + smoke_detector_02, network_link_01, dome_automation_01
 
 
 def test_common_fields(stepped_simulator):
@@ -625,7 +625,7 @@ def test_water_filter_flush_and_reserve(stepped_simulator):
 def test_fire_suppression(stepped_simulator):
     sim = stepped_simulator
     sim.control("fire_suppression_01", "manual_start_zone", "FABLAB")
-    steps(sim, 3)
+    steps(sim, 1)  # цикл пуска — 5 минут, шаг legacy — 4 игровые минуты
     fs = sim.get_node("fire_suppression_01")
     assert fs["state"] == "ACTIVE" and fs["valves"]["FABLAB"] == "OPEN"
     assert fs["pressure_bar"] < 5.0

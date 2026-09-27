@@ -3,11 +3,16 @@
 Водоснабжение и водоподготовка (раздел 5.1–5.3 реестра dome_sandbox_nodes.md):
 water_pump, water_tank, water_filter.
 
-Связь «насос → фильтр → резервуар» задаётся позже правилами. Пока:
+Связь «насос → фильтр → резервуар → пожаротушение» задают правила зависимостей
+(rules.py) через входы control_*. Без правил:
 - насос работает от собственного реле давления (гидроаккумулятор);
 - резервуар расходуется по суточному профилю и пополняется базовым
   притоком (control_inflow_l_min=None);
 - фильтр изнашивается по типовому расходу воды.
+
+Каскад К6: мутный источник быстро изнашивает фильтр → растёт перепад давления →
+насос работает на пределе и перегревается → резервуар не пополняется →
+пожаротушению не хватает воды.
 """
 from __future__ import annotations
 
@@ -44,6 +49,9 @@ class WaterPump(SandboxNode):
     доля времени работы — duty_cycle_pct).
     Уровень в скважине падает при откачке и восстанавливается притоком.
     Аварии: DRY_RUN (сухой ход), OVERHEAT.
+    Вход правил control_filter_dp_bar — перепад давления на фильтре: подача
+    падает, двигатель нагружается сильнее (перегрев при забитом фильтре, К6).
+    delivered_l_min — средняя подача насоса (для правила «насос → резервуар»).
     """
     title = "Насосная станция / скважина"
     system = "Водоснабжение"
@@ -75,7 +83,9 @@ class WaterPump(SandboxNode):
             "power_limit_pct": 100.0,
             "alarm": False,
             "alarm_code": None,            # DRY_RUN | OVERHEAT
+            "delivered_l_min": 0.0,
             "control_demand_l_min": None,
+            "control_filter_dp_bar": None,
         }
 
     def simulate(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
@@ -87,13 +97,16 @@ class WaterPump(SandboxNode):
 
         level_l = node["source_level_pct"] / 100.0 * self.well_capacity_l
         limit = node["power_limit_pct"] / 100.0
+        dp = float(node.get("control_filter_dp_bar") or 0.0)
         capacity = self.nominal_flow_l_min * limit ** (1 / 3)  # подача падает с ограничением мощности
+        capacity *= clamp(1.0 - 0.45 * dp, 0.05, 1.0)       # и с сопротивлением фильтра
 
         # Шаг симуляции (минуты игрового времени) много больше цикла реле давления,
         # поэтому считаем усреднённо: доля времени работы насоса = спрос / подача,
         # а running и давление — мгновенные значения в случайный момент цикла.
+        clogged = dp > 0.9  # забитый фильтр: реле давления не достигает отсечки — насос не выключается
         if state == ON and level_l > 1.0:
-            duty = clamp(demand / capacity, 0.0, 1.0)
+            duty = 1.0 if clogged else clamp(demand / capacity, 0.0, 1.0)
             pumped = min(min(demand, capacity) * gdt / 60.0, level_l)
             running = self.rng.random() < duty
             if duty < 1.0:
@@ -110,7 +123,7 @@ class WaterPump(SandboxNode):
         power = self.rated_w * limit * (0.9 + 0.1 * pressure / self.P_OFF) if running else 0.0
         current = power / (230.0 * 0.85)
         ambient = self.env.outdoor.temperature_c
-        motor_temp = relax(node["motor_temp_c"], ambient + 45.0 * limit * duty, 1800, gdt)
+        motor_temp = relax(node["motor_temp_c"], ambient + 45.0 * limit * duty * (1.0 + 1.2 * dp), 900, gdt)
 
         level_pct = level_l / self.well_capacity_l * 100.0
         if duty > 0 and level_pct < 5.0:
@@ -120,8 +133,10 @@ class WaterPump(SandboxNode):
             state, alarm_code, running = FAULT, "OVERHEAT", False
             self.emit("water_pump.alarm", Severity.CRITICAL, alarm_code=alarm_code)
 
+        delivered = 0.0 if state == FAULT else pumped / (gdt / 60.0) if gdt > 0 else 0.0
         return {
             "flow_l_min": round(pump_flow, 2),
+            "delivered_l_min": round(delivered, 3),
             "pressure_bar": round(pressure + self.noise(0.02), 2),
             "duty_cycle_pct": round(duty * 100.0, 1),
             "source_level_pct": round(level_pct, 1),
@@ -230,9 +245,12 @@ class WaterTank(SensorNode):
 @register_node_type("water_filter")
 class WaterFilter(SandboxNode):
     """
-    Два картриджа — основной и резервный. Износ растёт с прокачанным объёмом;
-    с износом растут перепад давления и мутность на выходе. Промывка
-    частично восстанавливает картридж. Вход для правил: control_flow_l_min.
+    Два картриджа — основной и резервный. Износ растёт с прокачанным объёмом
+    и сильно — с мутностью источника ((мутность/норма)³, мутность ×5 при паводке
+    — К6, env.drivers.water_turbidity_k); с износом растут перепад давления и
+    мутность на выходе. Промывка частично восстанавливает картридж.
+    Входы правил: control_flow_l_min; кризисный control_wear_boost — ускорение
+    износа (сжатие времени кризиса в рамках смены).
     """
     title = "Система фильтрации воды"
     system = "Водоснабжение"
@@ -257,7 +275,9 @@ class WaterFilter(SandboxNode):
             "hours_to_replacement": 0.0,
             "system_state": "NORMAL",      # NORMAL | FLUSHING | BYPASS
             "warning_active": False,
+            "source_turbidity_ntu": 4.0,
             "control_flow_l_min": None,
+            "control_wear_boost": 1.0,
         }
 
     @staticmethod
@@ -273,6 +293,8 @@ class WaterFilter(SandboxNode):
         active = node["active_filter"]
         wear = dict(node["wear_pct"])
         system_state = node["system_state"]
+        source_ntu = max(0.5, self._source_turbidity.step(gdt)) * float(self.env.drivers.water_turbidity_k)
+        dirt_k = (source_ntu / 4.0) ** 3 * float(node.get("control_wear_boost") or 1.0)
 
         if system_state == "FLUSHING":
             self._flush_remaining_s -= gdt
@@ -282,10 +304,9 @@ class WaterFilter(SandboxNode):
                 self.emit("water_filter.flush_done", wear_pct=round(wear[active], 1))
             flow = 0.0
         else:
-            wear[active] = min(100.0, wear[active] + flow * gdt / 60.0 / self.cartridge_life_l * 100.0)
+            wear[active] = min(100.0, wear[active] + flow * gdt / 60.0 / self.cartridge_life_l * 100.0 * dirt_k)
 
         w = wear[active] / 100.0
-        source_ntu = max(0.5, self._source_turbidity.step(gdt))
         turbidity = source_ntu * (0.04 + 0.4 * w ** 3)
         pressure_drop = 0.15 + 1.2 * w ** 2 if flow > 0 else 0.0
         chlorine = relax(node["residual_chlorine_mg_l"], 0.45 - 0.2 * w, 3600, gdt)
@@ -313,6 +334,7 @@ class WaterFilter(SandboxNode):
             "hours_to_replacement": round(hours_left, 1),
             "system_state": system_state,
             "warning_active": warning_active,
+            "source_turbidity_ntu": round(source_ntu, 2),
         }
 
     @control("switch_to_reserve", "switch_filter")

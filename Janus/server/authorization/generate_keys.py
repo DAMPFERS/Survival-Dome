@@ -3,8 +3,12 @@
 Генерирует 4 ключа для команд + 1 ключ админа (32 символа, строки)
 Сохраняет SHA-256 хэши в keys_config.json
 Исходные ключи показывает один раз в консоли - их нужно раздать пользователям
+
+    python generate_keys.py                              # только консоль
+    python generate_keys.py --out ../../data/Hash-keys   # + admin.txt, team_1..4.txt
 """
 
+import argparse
 import secrets
 import string
 import hashlib
@@ -66,5 +70,20 @@ def generateAllKeys():
     return teamKeys, adminKey, config
 
 
+def saveKeyFiles(outDir: str, teamKeys, adminKey: str) -> None:
+    """Сохраняет исходные ключи в txt (по файлу на ключ) — для раздачи командам и админ-панели."""
+    os.makedirs(outDir, exist_ok=True)
+    files = {"admin.txt": adminKey, **{f"team_{i}.txt": k for i, k in enumerate(teamKeys, 1)}}
+    for name, key in files.items():
+        with open(os.path.join(outDir, name), 'w', encoding='utf-8') as f:
+            f.write(key + "\n")
+    print(f"Исходные ключи сохранены в: {os.path.abspath(outDir)} ({', '.join(files)})")
+
+
 if __name__ == "__main__":
-    generateAllKeys()
+    parser = argparse.ArgumentParser(description="Генерация ключей доступа купола")
+    parser.add_argument("--out", help="папка для txt-файлов с исходными ключами")
+    args = parser.parse_args()
+    teamKeys, adminKey, _ = generateAllKeys()
+    if args.out:
+        saveKeyFiles(args.out, teamKeys, adminKey)

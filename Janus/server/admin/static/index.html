@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>МКИ 2026 — Админ-панель купола</title>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<header class="top">
+  <img class="logo" src="assets/logo_1.png" alt="Логотип 1">
+  <div class="title">
+    <h1>Админ-панель купола</h1>
+    <p>МКИ: Лига автономных систем · полный доступ</p>
+  </div>
+  <div class="clock">
+    <div><span>Время купола</span><b id="gameTime">—</b></div>
+    <div><span>Симуляция</span><b id="simTime">—</b></div>
+    <div><span>Команда</span><b id="activeTeam">—</b></div>
+  </div>
+  <div class="live" id="live"><i></i><span id="upd">подключение…</span></div>
+  <img class="logo" src="assets/logo_2.png" alt="Логотип 2">
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-tab="overview" role="tab">Обзор</button>
+  <button class="tab" data-tab="nodes" role="tab">Узлы</button>
+  <button class="tab" data-tab="crises" role="tab">Кризисы <em id="crisisCount"></em></button>
+  <button class="tab" data-tab="env" role="tab">Окружение</button>
+  <button class="tab" data-tab="access" role="tab">Доступ</button>
+  <button class="tab" data-tab="log" role="tab">Журнал <em id="logCount"></em></button>
+</nav>
+
+<main class="content">
+  <!-- ============ ОБЗОР ============ -->
+  <section class="page active" id="page-overview">
+    <div class="grid">
+      <article class="card">
+        <h2>Время и смена</h2>
+        <div class="kvs" id="timeInfo"></div>
+        <div class="row">
+          <button id="btnPause" class="ghost">Пауза</button>
+          <button id="btnResume" class="ghost">Продолжить</button>
+          <label class="inline">×<input id="scaleInput" type="number" min="0" max="100" step="0.5" value="1"></label>
+          <button id="btnScale">Скорость</button>
+        </div>
+        <div class="row">
+          <label class="inline">Активная команда
+            <select id="teamSelect"><option>1</option><option>2</option><option>3</option><option>4</option></select>
+          </label>
+          <button id="btnTeam">Назначить</button>
+        </div>
+        <details class="sub">
+          <summary>Запуск смены (сценарий 90 минут)</summary>
+          <label class="check"><input id="simOperator" type="checkbox" checked> Виртуальный Оператор (задания станков и пайка по программе)</label>
+          <label class="block">Параметры (JSON, необязательно)
+            <textarea id="shiftParams" rows="3" placeholder='{"seed": 2026, "soc_pct": 64}'></textarea>
+          </label>
+          <div class="row">
+            <button id="btnStartShift" class="danger">Сбросить мир и начать смену</button>
+            <button id="btnShiftReport" class="ghost">Отчёт смены</button>
+          </div>
+        </details>
+      </article>
+
+      <article class="card">
+        <h2>Энергосистема</h2>
+        <div class="tiles" id="energyTiles"></div>
+        <div class="kvs" id="energyInfo"></div>
+      </article>
+
+      <article class="card">
+        <h2>Метрики смены</h2>
+        <div id="shiftMetrics" class="kvs"><span class="mut">Смена не запущена</span></div>
+      </article>
+
+      <article class="card wide">
+        <h2>Умный щиток — линии</h2>
+        <div id="panelLines" class="lines-table"></div>
+      </article>
+
+      <article class="card wide">
+        <h2>Автоматика купола — интерлоки <span class="mut" id="autonomy"></span></h2>
+        <div id="interlocks" class="il-table"></div>
+      </article>
+
+      <article class="card wide">
+        <h2>Журнал автоматики <button id="btnAckAll" class="ghost small">Квитировать всё</button></h2>
+        <div id="autoEvents" class="events"></div>
+      </article>
+
+      <article class="card wide">
+        <h2>Активные кризисы</h2>
+        <div id="activeCrisesOverview"></div>
+      </article>
+    </div>
+  </section>
+
+  <!-- ============ УЗЛЫ ============ -->
+  <section class="page" id="page-nodes">
+    <div class="toolbar">
+      <input id="nodeFilter" type="search" placeholder="Фильтр: id, название, система…">
+      <label class="check"><input id="showTruth" type="checkbox" checked> Показывать истину рядом с телеметрией агента</label>
+      <label class="check"><input id="showHidden" type="checkbox"> Служебные входы control_*</label>
+      <span class="legend"><i class="dist"></i> подменено для агента <i class="frozen"></i> заморожено</span>
+    </div>
+    <div class="grid nodes" id="nodesGrid"></div>
+  </section>
+
+  <!-- ============ КРИЗИСЫ ============ -->
+  <section class="page" id="page-crises">
+    <div class="grid">
+      <article class="card wide">
+        <h2>Активные</h2>
+        <div id="activeCrises"></div>
+      </article>
+      <article class="card wide">
+        <h2>Каталог <span class="mut">(№1–49 — исходный список, К1–К13 — каскады)</span></h2>
+        <div class="toolbar">
+          <input id="crisisFilter" type="search" placeholder="Фильтр кризисов…">
+          <label class="inline grow">Параметры запуска (JSON)
+            <input id="crisisParams" type="text" placeholder='{"duration_s": 600}'>
+          </label>
+        </div>
+        <div id="crisisCatalog" class="catalog"></div>
+      </article>
+      <article class="card wide">
+        <h2>Отчёты кризисов</h2>
+        <div id="crisisReports"></div>
+      </article>
+      <article class="card wide">
+        <h2>Слой телеметрии — подмены и заморозки</h2>
+        <div id="telemetryLayer"></div>
+      </article>
+    </div>
+  </section>
+
+  <!-- ============ ОКРУЖЕНИЕ ============ -->
+  <section class="page" id="page-env">
+    <div class="grid" id="envGrid"></div>
+  </section>
+
+  <!-- ============ ДОСТУП ============ -->
+  <section class="page" id="page-access">
+    <div class="grid">
+      <article class="card wide">
+        <h2>Права участника (access_policy.json)</h2>
+        <div class="row">
+          <button id="btnGetPolicy">Загрузить политику</button>
+          <button id="btnReloadPolicy" class="ghost">Перечитать файл</button>
+        </div>
+        <div class="toolbar">
+          <select id="policyNode"></select>
+          <label class="inline grow">Действия (через запятую или *)
+            <input id="policyActions" type="text" placeholder="line_on, line_off">
+          </label>
+          <label class="check"><input id="policyVisible" type="checkbox" checked> Узел виден</label>
+          <button id="btnSetPolicy">Сохранить для узла</button>
+        </div>
+        <pre id="policyView" class="pre"></pre>
+      </article>
+    </div>
+  </section>
+
+  <!-- ============ ЖУРНАЛ ============ -->
+  <section class="page" id="page-log">
+    <div class="toolbar"><button id="btnClearLog" class="ghost">Очистить</button></div>
+    <div id="log" class="events log"></div>
+  </section>
+</main>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-box">
+    <div class="modal-head"><b id="modalTitle"></b><button id="modalClose" class="ghost small">Закрыть</button></div>
+    <pre id="modalBody" class="pre"></pre>
+  </div>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="js/app.js"></script>
+</body>
+</html>
