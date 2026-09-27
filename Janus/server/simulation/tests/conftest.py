@@ -14,6 +14,13 @@ from dome_simulator import create_dome_simulator
 
 
 @pytest.fixture
+def stepped_simulator():
+    """Симулятор без фонового потока с фиксированным seed — для детерминированных
+    тестов через sim.step(). Один шаг = 4 с симуляции = 4 игровые минуты."""
+    return create_dome_simulator(tick_interval=4.0, time_scale=1.0, seed=12345)
+
+
+@pytest.fixture
 def simulator():
     """Базовый симулятор с коротким tick_interval для быстрых тестов."""
     sim = create_dome_simulator(tick_interval=1.0, time_scale=1.0)
@@ -52,13 +59,3 @@ def event_collector():
     collector.clear = lambda: events.clear()
     return collector
 
-
-@pytest.fixture
-def crisis_params():
-    """Базовые параметры для тестирования кризисов."""
-    return {
-        "power_loss": {"target_node_id": "solar_1", "duration_s": 8.0},
-        "co2_spike": {"multiplier": 5.0, "duration_s": 8.0},
-        "temperature_anomaly": {"shock_c": 10.0, "duration_s": 8.0},
-        "solar_degradation": {"severity": 0.01, "duration_s": 8.0}
-    }

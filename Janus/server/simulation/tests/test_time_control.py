@@ -8,21 +8,17 @@ def test_pause_simulation(running_simulator):
     """Пауза останавливает изменения."""
     sim = running_simulator
     
-    # Запоминаем состояние
-    initial_charge = sim.get("battery_1", "charge_kwh")
-    initial_sim_time = sim.time_controller.sim_time
-    
-    # Ставим на паузу
+    # Ставим на паузу и даём завершиться тику, который мог уже идти
     sim.pause()
-    
+    time.sleep(1.2)
+    initial_state = sim.get_all()
+    initial_sim_time = sim.time_controller.sim_time
+
     time.sleep(2.0)
-    
-    # Состояние не должно измениться
-    paused_charge = sim.get("battery_1", "charge_kwh")
-    paused_sim_time = sim.time_controller.sim_time
-    
-    assert abs(paused_charge - initial_charge) < 0.1  # почти не изменился
-    assert paused_sim_time == initial_sim_time  # sim_time остановился
+
+    # Состояние не должно измениться — при dt=0 узлы не тикают
+    assert sim.get_all() == initial_state
+    assert sim.time_controller.sim_time == initial_sim_time  # sim_time остановился
 
 
 def test_resume_simulation(running_simulator):
@@ -33,22 +29,23 @@ def test_resume_simulation(running_simulator):
     sim.pause()
     time.sleep(1.0)
     
-    paused_charge = sim.get("battery_1", "charge_kwh")
-    
+    paused_state = sim.get_node("climate_sensor_01")
+    paused_game_time = sim.environment.game_time_s
+
     # Возобновляем
     sim.resume()
-    time.sleep(2.0)
-    
+    time.sleep(2.5)
+
     # Состояние снова меняется
-    resumed_charge = sim.get("battery_1", "charge_kwh")
-    assert resumed_charge != paused_charge
+    assert sim.environment.game_time_s > paused_game_time
+    assert sim.get_node("climate_sensor_01") != paused_state
 
 
 def test_time_scale_acceleration(fast_simulator):
     """Ускорение времени (x2, x4)."""
     sim = fast_simulator  # изначально time_scale=4.0
     sim.start()
-    
+    time.sleep(0.25)  # середина интервала тика: иначе замер попадает на границу тика
     # При time_scale=4.0 за 2 реальные секунды проходит 8 сек симуляции
     initial_sim_time = sim.time_controller.sim_time
     
@@ -77,32 +74,31 @@ def test_time_scale_change_runtime(running_simulator):
     
     # Симуляция продолжает работать
     time.sleep(1.0)
-    charge = sim.get("battery_1", "charge_kwh")
-    assert charge > 0
+    soc = sim.get("battery_01", "soc_pct")
+    assert soc > 0
 
 
 def test_dt_is_zero_on_pause(running_simulator):
     """dt=0 при паузе."""
     sim = running_simulator
     
-    # Запоминаем состояние
-    initial_wear = sim.get("structure_1", "wear_pct")
-    
-    # Ставим на паузу
     sim.pause()
-    
+    time.sleep(1.2)  # даём завершиться текущему тику
+    initial_leak = sim.get("dome_sealing_01", "leak_rate_pct")
+    initial_game_time = sim.environment.game_time_s
+
     time.sleep(2.0)
-    
-    # Износ не должен расти (dt=0)
-    paused_wear = sim.get("structure_1", "wear_pct")
-    assert paused_wear == initial_wear
+
+    # Утечка оболочки не растёт, игровое время стоит (dt=0)
+    assert sim.get("dome_sealing_01", "leak_rate_pct") == initial_leak
+    assert sim.environment.game_time_s == initial_game_time
 
 
 def test_sim_time_accumulation(fast_simulator):
     """Накопление симуляционного времени."""
     sim = fast_simulator  # time_scale=4.0
     sim.start()
-    
+    time.sleep(0.25)  # середина интервала тика: иначе замер попадает на границу тика
     initial_sim_time = sim.time_controller.sim_time
     
     time.sleep(3.0)  # 3 реальные секунды

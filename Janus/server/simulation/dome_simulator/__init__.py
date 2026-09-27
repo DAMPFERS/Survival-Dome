@@ -1,64 +1,86 @@
 # dome_simulator/__init__.py
 """
-Точка сборки: create_dome_simulator() поднимает Simulator с полным
-стартовым набором узлов из ТЗ (п.4.4), правилами зависимостей (часть 5)
-и кризисами (часть 6) — то, что участники хакатона получают "из коробки".
+Точка сборки: create_dome_simulator() поднимает Simulator с полным набором
+узлов песочницы из реестра dome_sandbox_nodes.md — то, что участники
+хакатона получают "из коробки".
+
+Правила зависимостей (rules.py) и кризисы (crises.py) написаны под прежний
+набор узлов и пока не подключаются — они будут переписаны под новые узлы.
+До этого узлы генерируют данные самостоятельно из общей модели окружения
+(environment.py).
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from .simulator import Simulator
-from .rules import build_default_rules
-from .crises import register_default_crises
+from .nodes.sandbox import ControlError
 
 # импорт нужен только ради срабатывания @register_node_type в NODE_TYPES
-from .nodes import power, climate, life_support, production, infra  # noqa: F401
+from .nodes import climate, comms, external, power, production, safety, water  # noqa: F401
+
+__all__ = ["ControlError", "Simulator", "create_dome_simulator", "SANDBOX_NODES"]
+
+# (code name, уникальный ID, конфигурация) — порядок регистрации = порядок тика
+SANDBOX_NODES: list[tuple[str, str, dict]] = [
+    # 1. Энергетика
+    ("solar_panels", "solar_panels_01", {}),
+    ("solar_inverter", "solar_inverter_01", {}),
+    ("battery", "battery_01", {}),
+    ("wind_turbine", "wind_turbine_01", {}),
+    ("dizel", "dizel_1", {}),
+    ("fuel_tank", "fuel_tank_01", {}),
+    # 2. Электроснабжение
+    ("smart_panel", "smart_panel_01", {}),
+    # 3. Производство
+    ("printer_3d", "printer_3d_01", {}),
+    ("cnc", "cnc_01", {}),
+    # 4. Климат и качество воздуха
+    ("climate_sensor", "climate_sensor_01", {}),
+    ("air_quality_sensor", "air_quality_sensor_01", {}),
+    ("smoke_detector", "smoke_detector_01", {}),
+    # 5. Вентиляция
+    ("fume_extraction", "fume_extraction_01", {}),
+    # 6. Метеорология
+    ("weather_station", "weather_station_01", {}),
+    # Внешние системы
+    ("seysmo", "seysmo_01", {}),
+    # Водоснабжение и водоподготовка
+    ("water_pump", "water_pump_01", {}),
+    ("water_tank", "water_tank_01", {}),
+    ("water_filter", "water_filter_01", {}),
+    ("fire_suppression", "fire_suppression_01", {}),
+    # Безопасность и периметр
+    ("access_control", "access_control_01", {}),
+    ("radiation_sensor", "radiation_sensor_01", {}),
+    ("chem_sensor", "chem_sensor_01", {}),
+    # 7. Производство и материалы
+    ("material_inventory", "material_inventory_01", {}),
+    ("equipment_cooling", "equipment_cooling_01", {}),
+    # 8. Климат, вентиляция и герметизация
+    ("supply_ventilation", "supply_ventilation_01", {}),
+    ("dome_sealing", "dome_sealing_01", {}),
+    ("climate_sensor_extra", "climate_sensor_02", {"reading_delay_s": 900.0, "drift_rate_c_per_day": 0.15}),
+    ("climate_sensor_extra", "climate_sensor_03", {"reading_delay_s": 1800.0, "drift_rate_c_per_day": 0.3}),
+    # 9. Связь и вычисления
+    ("radio", "radio_01", {}),
+    ("backup_comms", "backup_comms_01", {}),
+    ("edge_compute", "edge_compute_01", {}),
+    # 10. МС-ТЮК
+    ("thermal_insulation", "thermal_insulation_01", {}),
+]
 
 
-def create_dome_simulator(tick_interval: float = 4.0, time_scale: float = 1.0) -> Simulator:
-    sim = Simulator(tick_interval=tick_interval, time_scale=time_scale)
-
-    # --- Энергетика ---
-    sim.add_node_from_type("solar_inverter", "solar_1", capacity_kw=12.0)
-    sim.add_node_from_type("solar_inverter", "solar_2", capacity_kw=12.0)
-    sim.add_node_from_type("battery_bank", "battery_1", capacity_kwh=60.0)
-    sim.add_node_from_type("diesel_generator", "diesel_1", max_output_kw=15.0)
-    for i in range(1, 9):  # минимум 8 реальных линий, п.4.4
-        sim.add_node_from_type("power_line", f"line_{i}", source="battery_1",
-                                target=f"consumer_{i}", max_capacity_kw=8.0)
-    sim.add_node_from_type("energy_consumer", "consumer_residential", base_demand_kw=4.0, priority=1)
-    sim.add_node_from_type("energy_consumer", "consumer_workshop", base_demand_kw=6.0, priority=6)
-
-    # --- Климат ---
-    sim.add_node_from_type("zone_climate", "climate_residential", zone_name="residential")
-    sim.add_node_from_type("zone_climate", "climate_workshop", zone_name="workshop")
-    sim.add_node_from_type("co2_sensor", "co2_sensor_1")
-    sim.add_node_from_type("co2_scrubber", "co2_scrubber_1")
-    sim.add_node_from_type("humidity_control", "humidity_1")
-    sim.add_node_from_type("ventilation_system", "ventilation_1")
-    sim.add_node_from_type("air_filter", "air_filter_1")
-
-    # --- Жизнеобеспечение ---
-    sim.add_node_from_type("water_tank", "water_tank_1")
-    sim.add_node_from_type("water_recycling", "water_recycling_1")
-    sim.add_node_from_type("oxygen_generator", "oxygen_gen_1")
-    sim.add_node_from_type("waste_management", "waste_1")
-
-    # --- Производство ---
-    sim.add_node_from_type("cnc_mill", "cnc_1")
-    sim.add_node_from_type("printer_3d", "printer_1")
-    sim.add_node_from_type("soldering_station", "solder_1")
-    sim.add_node_from_type("work_station", "workstation_1")
-
-    # --- Скрытые/инфраструктурные ---
-    sim.add_node_from_type("main_controller", "main_controller")
-    sim.add_node_from_type("emergency_lighting", "emergency_lights_1")
-    sim.add_node_from_type("fire_suppression", "fire_suppression_1")
-    sim.add_node_from_type("structural_integrity", "structure_1")
-    sim.add_node_from_type("network_node", "network_1")
-
-    # --- Правила и кризисы ---
-    for name, func in build_default_rules():
-        sim.add_dependency_rule(name, func)
-    register_default_crises(sim.scenario_engine)
-
+def create_dome_simulator(tick_interval: float = 4.0, time_scale: float = 1.0,
+                          day_length_s: float = 1440.0, seed: Optional[int] = None) -> Simulator:
+    """
+    day_length_s — длительность игровых суток в секундах симуляции
+    (по умолчанию 1440: 1 с симуляции = 1 игровая минута).
+    seed — фиксирует генерацию данных (одинаковый прогон для тестов/демо).
+    """
+    sim = Simulator(tick_interval=tick_interval, time_scale=time_scale,
+                    day_length_s=day_length_s, seed=seed)
+    for index, (type_name, node_id, config) in enumerate(SANDBOX_NODES):
+        node_seed = None if seed is None else seed * 1000 + index
+        sim.add_node_from_type(type_name, node_id, seed=node_seed, **config)
     return sim

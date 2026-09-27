@@ -1,169 +1,72 @@
 # tests/test_integration.py
-"""Интеграционные тесты комплексных сценариев."""
+"""Интеграционные тесты: сутки работы купола, согласованность данных, персистентность."""
 import time
-import pytest
-from .helpers import simulate_for_ticks, wait_for_crisis_end, collect_parameter_over_time
+
+from dome_simulator import create_dome_simulator
+
+STEPS_PER_DAY = 360  # 1440 с симуляции / тик 4 с
 
 
-def test_full_day_night_cycle(fast_simulator):
-    """Полный суточный цикл без кризисов."""
-    sim = fast_simulator
-    sim.start()
-    
-    # Собираем данные о выработке панелей
-    values = []
-    for _ in range(10):
-        output = sim.get("solar_1", "output_kw")
-        irradiance = sim.get("solar_1", "irradiance")
-        values.append((output, irradiance))
-        time.sleep(0.5)
-    
-    # Проверяем, что выработка меняется
-    outputs = [v[0] for v in values]
-    assert len(set(outputs)) > 1  # значения различаются
-    
-    sim.stop()
+def test_full_day_runs_and_data_is_coherent(stepped_simulator):
+    """Сутки без ошибок; солнце, температура и нагрузка следуют суточному циклу."""
+    sim = stepped_simulator
+    errors = []
+    sim.subscribe("dependency.violation", errors.append)
+
+    by_hour = {}
+    for _ in range(STEPS_PER_DAY):
+        sim.step()
+        hour = int(sim.environment.outdoor.hour)
+        by_hour.setdefault(hour, []).append((
+            sim.get("solar_panels_01", "power_w"),
+            sim.get("weather_station_01", "temperature_c"),
+            sim.get("smart_panel_01", "total_power_w"),
+        ))
+
+    def avg(hour, idx):
+        return sum(v[idx] for v in by_hour[hour]) / len(by_hour[hour])
+
+    assert avg(13, 0) > 100 and avg(2, 0) == 0.0           # солнце
+    assert avg(15, 1) > avg(4, 1)                           # днём теплее, чем перед рассветом
+    assert avg(20, 2) > avg(3, 2)                           # вечером освещение, ночью дежурная нагрузка
+    assert not errors
 
 
-def test_production_workflow(running_simulator):
-    """Запуск серии заданий на производстве."""
+def test_events_are_published(stepped_simulator):
+    sim = stepped_simulator
+    events = []
+    sim.subscribe_all(events.append)
+    for _ in range(STEPS_PER_DAY):
+        sim.step()
+    assert events, "за сутки должны случиться хотя бы задания принтера/фрезера"
+    assert all(e.source for e in events)
+
+
+def test_background_thread_generates_data(running_simulator):
     sim = running_simulator
-    
-    # Запускаем задания на разных станках
-    sim.control("cnc_1", "start_job", job_name="part_1", duration_s=5.0)
-    sim.control("printer_1", "start_job", job_name="bracket", duration_s=6.0)
-    sim.control("solder_1", "start_job", job_name="board", duration_s=4.0)
-    
-    time.sleep(1.0)
-    
-    # Все должны работать
-    assert sim.get("cnc_1", "status") == "running"
-    assert sim.get("printer_1", "status") == "running"
-    assert sim.get("solder_1", "status") == "running"
-    
-    # Ждём завершения самого короткого
-    time.sleep(5.0)
-    
-    # Solder должен завершиться первым
-    solder_status = sim.get("solder_1", "status")
-    assert solder_status in ["done", "idle"]
+    first = sim.get_node("climate_sensor_01")
+    time.sleep(2.5)
+    assert sim.get_node("climate_sensor_01") != first
+    assert sim.environment.game_time_s > 8 * 3600  # старт в 08:00 + прошедшее время
 
 
-def test_energy_crisis_recovery(running_simulator, event_collector):
-    """Кризис энергии → автозапуск дизеля → восстановление."""
-    sim = running_simulator
-    sim.subscribe_all(event_collector)
-    
-    # Устанавливаем низкий заряд батареи
-    sim.set("battery_1", "charge_pct", 0.15)
-    sim.set("battery_1", "charge_kwh", 9.0)
-    sim.set("diesel_1", "fuel_l", 150.0)
-    
-    time.sleep(2.0)
-    
-    # Дизель должен запуститься автоматически
-    diesel_running = sim.get("diesel_1", "running")
-    assert diesel_running == True
-    
-    # Батарея начинает заряжаться
-    time.sleep(3.0)
-    
-    charge_after = sim.get("battery_1", "charge_kwh")
-    assert charge_after > 9.0  # зарядилась
+def test_persistent_state_save_load(stepped_simulator, tmp_path):
+    sim = stepped_simulator
+    for _ in range(20):
+        sim.step()
+    sim.control("solar_inverter_01", "set_mode", "GRID_ONLY")
+    path = tmp_path / "dome_state.json"
+    sim.save_snapshot(path)
+
+    sim2 = create_dome_simulator(seed=1)
+    sim2.load_snapshot(path)
+    assert sim2.get_all() == sim.get_all()
+    assert sim2.get("solar_inverter_01", "mode") == "GRID_ONLY"
+    sim2.step()  # после загрузки узлы продолжают работать с загруженного состояния
+    assert sim2.get("solar_inverter_01", "mode") == "GRID_ONLY"
 
 
-def test_co2_crisis_with_scrubber_response(running_simulator):
-    """Кризис CO2 → включение скруббера → стабилизация."""
-    sim = running_simulator
-    
-    # Запускаем кризис CO2
-    sim.trigger_crisis("co2_spike", {"multiplier": 5.0, "duration_s": 5.0})
-    
-    # Включаем скруббер на полную мощность
-    sim.update("co2_scrubber_1", enabled=True, control_powered=True, health=1.0)
-    
-    initial_ppm = sim.get("co2_sensor_1", "ppm")
-    
-    time.sleep(6.0)  # ждём окончания кризиса
-    
-    # CO2 должен стабилизироваться или хотя бы не вырасти сильно
-    final_ppm = sim.get("co2_sensor_1", "ppm")
-    assert final_ppm < initial_ppm + 500  # рост не катастрофический
-
-
-def test_cascading_failures(running_simulator, event_collector):
-    """Каскадные отказы: power loss → производство прервано → CO2 растёт."""
-    sim = running_simulator
-    sim.subscribe_all(event_collector)
-    
-    # Запускаем производство
-    sim.control("cnc_1", "start_job", job_name="test", duration_s=20.0)
-    time.sleep(1.0)
-    
-    # Кризис энергии
-    sim.trigger_crisis("power_loss", {"target_node_id": "solar_1", "duration_s": 5.0})
-    
-    time.sleep(3.0)
-    
-    # Производство должно прерваться или отключиться питанием
-    cnc_status = sim.get("cnc_1", "status")
-    cnc_powered = sim.get("cnc_1", "control_powered")
-    
-    # Либо прервано, либо выключено
-    assert cnc_status == "interrupted" or cnc_powered == False
-
-
-def test_operator_intervention(running_simulator):
-    """Вмешательство оператора во время кризиса."""
-    sim = running_simulator
-    
-    # Запускаем кризис
-    sim.trigger_crisis("power_loss", {"target_node_id": "solar_1", "duration_s": 10.0})
-    time.sleep(1.0)
-    
-    # Оператор вручную запускает дизель
-    sim.update("diesel_1", running=True, fuel_l=100.0, control_target_output_kw=15.0)
-    
-    time.sleep(2.0)
-    
-    # Дизель работает
-    diesel_output = sim.get("diesel_1", "output_kw")
-    assert diesel_output > 0
-    
-    # Оператор останавливает кризис досрочно
-    sim.stop_crisis("power_loss")
-    time.sleep(1.0)
-    
-    # Панель восстановлена
-    capacity = sim.get("solar_1", "capacity_kw")
-    assert capacity > 0
-
-
-def test_persistent_state_save_load(simulator, tmp_path):
-    """Сохранение и загрузка состояния."""
-    sim = simulator
-    sim.start()
-    
-    # Устанавливаем специфичное состояние
-    sim.set("battery_1", "charge_kwh", 42.0)
-    sim.set("diesel_1", "fuel_l", 123.45)
-    
-    time.sleep(1.0)
-    
-    # Сохраняем
-    snapshot_file = tmp_path / "test_snapshot.json"
-    sim.save_snapshot(str(snapshot_file))
-    
-    sim.stop()
-    
-    # Создаём новый симулятор и загружаем состояние
-    from dome_simulator import create_dome_simulator
-    sim2 = create_dome_simulator()
-    sim2.load_snapshot(str(snapshot_file))
-    
-    # Проверяем восстановление
-    battery_charge = sim2.get("battery_1", "charge_kwh")
-    diesel_fuel = sim2.get("diesel_1", "fuel_l")
-    
-    assert battery_charge == 42.0
-    assert diesel_fuel == 123.45
+def test_step_forbidden_while_thread_running(running_simulator):
+    import pytest
+    with pytest.raises(RuntimeError):
+        running_simulator.step()

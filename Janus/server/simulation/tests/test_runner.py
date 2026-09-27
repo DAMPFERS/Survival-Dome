@@ -7,8 +7,6 @@
     python test_runner.py                    # все тесты
     python test_runner.py --category state   # только тесты параметров
     python test_runner.py --category nodes   # только тесты узлов
-    python test_runner.py --category deps    # только зависимости
-    python test_runner.py --category crises  # только кризисы
     python test_runner.py --category integration  # интеграционные
     python test_runner.py --category time    # управление временем
     python test_runner.py --category threads # потокобезопасность
@@ -26,9 +24,8 @@ from pathlib import Path
 CATEGORIES = {
     "state": "test_state_store.py",
     "nodes": "test_nodes.py",
-    "deps": "test_dependencies.py",
-    "crises": "test_crises.py",
     "integration": "test_integration.py",
+    # "deps" и "crises" вернутся вместе с правилами/кризисами для узлов песочницы
     "time": "test_time_control.py",
     "threads": "test_thread_safety.py",
 }

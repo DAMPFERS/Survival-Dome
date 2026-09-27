@@ -6,14 +6,20 @@
 писатель — SimulatorThread, но чтение/точечная запись возможны из
 любого потока (например, API Gateway дергает set() для control_*
 параметров) — отсюда RLock на все операции.
+
+Параметры узлов бывают вложенными (линии щитка, списки вентиляторов),
+поэтому наружу всегда отдаются ГЛУБОКИЕ копии: вызывающий код не может
+случайно изменить состояние в обход блокировки.
 """
 from __future__ import annotations
 
+import copy
 import json
 import threading
+from contextlib import contextmanager
 import time
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterator
 
 
 class NodeNotFoundError(KeyError):
@@ -25,12 +31,21 @@ class StateStore:
         self._data: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Держит блокировку хранилища на время группы операций.
+        SimulatorThread выполняет под ней весь тик, а Simulator.control() —
+        управляющую команду, поэтому команда не может «вклиниться» в середину
+        тика и потеряться при записи результатов тика."""
+        with self._lock:
+            yield
+
     # ---------- регистрация узлов ----------
 
     def register_node(self, node_id: str, initial_state: dict[str, Any]) -> None:
         """Создаёт запись под узел. Идемпотентно перезатирает при повторной регистрации."""
         with self._lock:
-            self._data[node_id] = dict(initial_state)
+            self._data[node_id] = copy.deepcopy(initial_state)
 
     def remove_node(self, node_id: str) -> None:
         with self._lock:
@@ -43,7 +58,7 @@ class StateStore:
             node = self._data.get(node_id)
             if node is None:
                 raise NodeNotFoundError(node_id)
-            return node.get(param, default)
+            return copy.deepcopy(node.get(param, default))
 
     def get_node(self, node_id: str) -> dict[str, Any]:
         """Возвращает КОПИЮ состояния узла — наружу мутабельные ссылки не отдаём."""
@@ -51,11 +66,11 @@ class StateStore:
             node = self._data.get(node_id)
             if node is None:
                 raise NodeNotFoundError(node_id)
-            return dict(node)
+            return copy.deepcopy(node)
 
     def get_all(self) -> dict[str, dict[str, Any]]:
         with self._lock:
-            return {nid: dict(params) for nid, params in self._data.items()}
+            return copy.deepcopy(self._data)
 
     def node_ids(self) -> list[str]:
         with self._lock:
@@ -66,7 +81,7 @@ class StateStore:
         with self._lock:
             return {
                 "timestamp": time.time(),
-                "nodes": {nid: dict(params) for nid, params in self._data.items()},
+                "nodes": copy.deepcopy(self._data),
             }
 
     # ---------- запись ----------
@@ -76,21 +91,21 @@ class StateStore:
             node = self._data.get(node_id)
             if node is None:
                 raise NodeNotFoundError(node_id)
-            node[param] = value
+            node[param] = copy.deepcopy(value)
 
     def update(self, node_id: str, **kwargs: Any) -> None:
         with self._lock:
             node = self._data.get(node_id)
             if node is None:
                 raise NodeNotFoundError(node_id)
-            node.update(kwargs)
+            node.update(copy.deepcopy(kwargs))
 
     def bulk_update(self, updates: dict[str, dict[str, Any]]) -> None:
         """Атомарно применяет несколько узлов сразу (например, результат тика)."""
         with self._lock:
             for node_id, params in updates.items():
                 node = self._data.setdefault(node_id, {})
-                node.update(params)
+                node.update(copy.deepcopy(params))
 
     # ---------- persistence (простой JSON snapshot) ----------
 

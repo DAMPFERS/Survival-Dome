@@ -21,48 +21,26 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .dependency_engine import DependencyEngine
+from .environment import Environment
 from .events import Event, EventBus, EventCallback
 from .nodes.base import BaseNode, NodeRegistry, create_node
-from .nodes.production import _JobRunnerMixin
+from .nodes.sandbox import SandboxNode
 from .scenario_engine import ScenarioEngine
-from .store import NodeNotFoundError, StateStore
+from .store import StateStore
 from .time_control import TimeController
 
 logger = logging.getLogger("dome_simulator.simulator")
 
 
-# Простые "action -> (field, value)" мэппинги для управляющих команд,
-# не требующих валидации/вычислений (см. пояснение в части 3).
-# Если поле есть в state узла — просто выставляем его.
-_ACTION_TO_FIELD: dict[str, tuple[str, Any]] = {
-    "enable": ("enabled", True),
-    "disable": ("enabled", False),
-    "start": ("running", True),
-    "stop": ("running", False),
-    "shed": ("shed", True),
-    "unshed": ("shed", False),
-    "arm": ("armed", True),
-    "disarm": ("armed", False),
-    "trigger": ("triggered", True),
-    "reset": ("triggered", False),
-    "activate": ("active", True),
-    "deactivate": ("active", False),
-    "disconnect": ("online", False),
-    "reconnect": ("online", True),
-    "force_reset": ("status", "ok"),
-    "start_processing": ("processing", True),
-    "stop_processing": ("processing", False),
-    "cancel_job": None,  # обрабатывается отдельной веткой ниже
-}
-
-
 class Simulator:
     """Фасад. Владеет жизненным циклом всех подсистем купола."""
 
-    def __init__(self, tick_interval: float = 4.0, time_scale: float = 1.0) -> None:
+    def __init__(self, tick_interval: float = 4.0, time_scale: float = 1.0,
+                 day_length_s: float = 1440.0, seed: Optional[int] = None) -> None:
         self.store = StateStore()
         self.event_bus = EventBus()
-        self.registry = NodeRegistry(self.store)
+        self.environment = Environment(day_length_s=day_length_s, seed=seed)
+        self.registry = NodeRegistry(self.store, self.environment)
         self.dependency_engine = DependencyEngine()
         self.scenario_engine = ScenarioEngine()
         self.time_controller = TimeController(tick_interval=tick_interval, time_scale=time_scale)
@@ -86,6 +64,7 @@ class Simulator:
             dependency_engine=self.dependency_engine,
             scenario_engine=self.scenario_engine,
             time_controller=self.time_controller,
+            environment=self.environment,
         )
         self._thread.start()
 
@@ -111,6 +90,21 @@ class Simulator:
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    def step(self, dt: Optional[float] = None) -> int:
+        """
+        Синхронно выполняет один тик в вызывающем потоке (тесты, отладка,
+        прогон «на N часов вперёд»). dt по умолчанию — tick_interval × time_scale.
+        Нельзя вызывать, пока работает фоновый поток.
+        """
+        from .simulator_thread import run_tick
+
+        if self.is_running:
+            raise RuntimeError("step() недоступен, пока симулятор запущен в фоновом потоке")
+        if dt is None:
+            dt = self.time_controller.compute_dt()
+        return run_tick(dt, self.store, self.event_bus, self.registry,
+                        self.dependency_engine, self.scenario_engine, self.environment)
+
     # ------------------------------------------------------------------
     # Доступ к данным (п.4.1)
     # ------------------------------------------------------------------
@@ -126,6 +120,11 @@ class Simulator:
 
     def snapshot(self) -> dict[str, Any]:
         return self.store.snapshot()
+
+    def environment_snapshot(self) -> dict[str, Any]:
+        """Истинные значения окружения (погода, воздух купола, внешние угрозы).
+        Для админки/отладки — участники видят их только через датчики."""
+        return self.environment.snapshot()
 
     def set(self, node_id: str, param: str, value: Any) -> None:
         self.store.set(node_id, param, value)
@@ -164,74 +163,46 @@ class Simulator:
     def node_ids(self) -> list[str]:
         return self.registry.node_ids()
 
+    def describe_nodes(self) -> list[dict[str, Any]]:
+        """Каталог узлов: id, тип, название, система и доступные управляющие воздействия."""
+        catalog = []
+        for node in self.registry.all_nodes():
+            catalog.append({
+                "node_id": node.node_id,
+                "code_name": node.code_name,
+                "title": getattr(node, "title", ""),
+                "system": getattr(node, "system", ""),
+                "category": node.category,
+                "controls": node.available_controls() if isinstance(node, SandboxNode) else [],
+                "control_aliases": node.control_aliases() if isinstance(node, SandboxNode) else {},
+            })
+        return catalog
+
     def control(self, node_id: str, action: str, value: Any = None,
                 job_name: Optional[str] = None, duration_s: Optional[float] = None) -> None:
         """
         Единая точка для управляющих команд участников хакатона.
 
-        Простые команды (enable/disable/start/stop/...) сразу пишутся в StateStore
-        по таблице _ACTION_TO_FIELD. Команды, требующие вычислений (start_job,
-        set_target_output_kw, refuel и т.п.), обрабатываются явно ниже.
+        Команда выполняется узлом (SandboxNode.handle_control) под блокировкой
+        тика. Неизвестное действие или недопустимое значение — ControlError
+        (подкласс ValueError) с перечнем допустимых вариантов.
+
+        job_name/duration_s — совместимость со старым API: превращаются в
+        value={"file_name": job_name, "duration_s": duration_s} (действие start_job).
         """
         node = self.registry.get(node_id)  # бросит KeyError, если узла нет — это ожидаемо
-        current = self.store.get_node(node_id)
+        if job_name is not None and value is None:
+            value = {"file_name": job_name}
+            if duration_s is not None:
+                value["duration_s"] = duration_s
 
-        if action == "start_job":
-            if not isinstance(node, _JobRunnerMixin):
-                raise TypeError(f"Узел {node_id!r} не поддерживает задания (не JobRunner)")
-            if not job_name or not duration_s:
-                raise ValueError("Для start_job нужны job_name и duration_s")
-            node._start_job(node_id, self.store, job_name, float(duration_s))
+        if not isinstance(node, SandboxNode):
+            node.apply_control(action, value)
             return
-
-        if action == "cancel_job":
-            if "job_remaining_s" not in current:
-                raise TypeError(f"Узел {node_id!r} не выполняет задания")
-            self.store.update(node_id, status="idle", job_name=None, job_remaining_s=0.0)
-            return
-
-        if action == "set_target_output_kw":
-            self.store.set(node_id, "control_target_output_kw", float(value))
-            return
-
-        if action == "set_max_discharge_kw":
-            self.store.set(node_id, "control_max_discharge_kw", float(value))
-            return
-
-        if action == "refuel":
-            capacity = getattr(node, "fuel_capacity_l", current.get("fuel_l", 0.0))
-            self.store.set(node_id, "fuel_l", capacity)
-            return
-
-        if action == "set_target_temp":
-            self.store.set(node_id, "target_temp_c", float(value))
-            return
-
-        if action == "apply_shock":
-            self.store.set(node_id, "external_shock_c", float(value))
-            return
-
-        if action == "replace":  # AirFilter
-            if "clog_pct" not in current:
-                raise TypeError(f"Узел {node_id!r} не поддерживает replace")
-            self.store.update(node_id, clog_pct=0.0, efficiency=1.0)
-            return
-
-        if action == "degrade":  # NetworkNode
-            if "latency_ms" not in current:
-                raise TypeError(f"Узел {node_id!r} не поддерживает degrade")
-            self.store.update(node_id, latency_ms=float(value or 500.0), packet_loss_pct=50.0)
-            return
-
-        mapping = _ACTION_TO_FIELD.get(action)
-        if mapping is not None:
-            field, mapped_value = mapping
-            if field in current:
-                self.store.set(node_id, field, mapped_value)
-                return
-
-        # Явных обработчиков нет — отдаём узлу (обычно бросит осмысленную ошибку)
-        node.apply_control(action, value)
+        with self.store.transaction():
+            events = node.handle_control(self.store, action, value)
+        for event in events:
+            self.event_bus.publish(event)
 
     # ------------------------------------------------------------------
     # События

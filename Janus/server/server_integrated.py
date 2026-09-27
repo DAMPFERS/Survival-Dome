@@ -32,7 +32,7 @@ except ImportError as e:
     SmartDeviceManager = None
 
 # Импорт симулятора
-from dome_simulator import create_dome_simulator
+from dome_simulator import ControlError, create_dome_simulator
 
 # ================= НАСТРОЙКА ЛОГИРОВАНИЯ =================
 logging.basicConfig(
@@ -44,40 +44,34 @@ logger = logging.getLogger("IntegratedServer")
 
 # ================= КОНФИГУРАЦИЯ =================
 
-# Маппинг реальных устройств на узлы симулятора
+# Маппинг реальных устройств на узлы симулятора (узлы песочницы, dome_sandbox_nodes.md).
+# "line" — реле умного щитка: несколько устройств пишут в одну линию списка lines узла.
+PANEL_NODE_ID = "smart_panel_01"
+
 REAL_TO_SIM_MAPPING = {
     # Реальное устройство -> конфигурация маппинга
     "inverter": {
-        "node_id": "solar_1",
+        "node_id": "solar_inverter_01",
         "mappings": {
-            "generated_power_kw": "output_kw",  # real_field -> sim_field
-        }
-    },
-    "battery": {
-        "node_id": "battery_1",
-        "mappings": {
-            "battery_soc_percent": "charge_pct",  # SOC % -> charge_pct
+            "generated_power_kw": "pv_power_w",   # real_field -> sim_field
+            "battery_soc_percent": "battery_soc_pct",
         },
         "conversions": {
-            "charge_pct_to_kwh": lambda pct: (pct / 100.0) * 0.96,  # 40Ah * 24V = 960Wh = 0.96kWh
-        }
+            "generated_power_kw_to_pv_power_w": lambda kw: round(kw * 1000.0, 1),
+        },
     },
-    "L1": {"node_id": "line_1", "mappings": {"state": "status", "power": "current_load_kw"}},
-    "L2": {"node_id": "line_2", "mappings": {"state": "status", "power": "current_load_kw"}},
-    "L3": {"node_id": "line_3", "mappings": {"state": "status", "power": "current_load_kw"}},
-    "L4": {"node_id": "line_4", "mappings": {"state": "status", "power": "current_load_kw"}},
-    "L5": {"node_id": "line_5", "mappings": {"state": "status", "power": "current_load_kw"}},
-    "L6": {"node_id": "line_6", "mappings": {"state": "status", "power": "current_load_kw"}},
-    "L7": {"node_id": "line_7", "mappings": {"state": "status", "power": "current_load_kw"}},
-    "L8": {"node_id": "line_8", "mappings": {"state": "status", "power": "current_load_kw"}},
-    "co2_sensor": {
-        "node_id": "co2_sensor_1",
-        "mappings": {"co2": "ppm"}
+    "battery": {
+        "node_id": "battery_01",
+        "mappings": {"battery_soc_percent": "soc_pct"},
+    },
+    **{
+        f"L{n}": {"node_id": PANEL_NODE_ID, "line": n, "mappings": {"state": "state", "power": "power_w"}}
+        for n in range(1, 9)
     },
     "climate": {
-        "node_id": "climate_residential",
-        "mappings": {"temperature": "temperature_c", "humidity": "humidity_pct"}
-    }
+        "node_id": "climate_sensor_01",
+        "mappings": {"co2": "co2_ppm", "temperature": "temperature_c", "humidity": "humidity_pct"},
+    },
 }
 
 # Маппинг ID канала (для обратной совместимости с фронтендом)
@@ -107,18 +101,10 @@ def init_default_modes():
     global node_modes
     if REAL_HARDWARE_AVAILABLE:
         node_modes = {
-            "solar_1": "real",
-            "battery_1": "real",
-            "line_1": "real",
-            "line_2": "real",
-            "line_3": "real",
-            "line_4": "real",
-            "line_5": "real",
-            "line_6": "real",
-            "line_7": "real",
-            "line_8": "real",
-            "co2_sensor_1": "real",
-            "climate_residential": "real",
+            "solar_inverter_01": "real",
+            "battery_01": "real",
+            PANEL_NODE_ID: "real",
+            "climate_sensor_01": "real",
         }
     else:
         node_modes = {}  # Все узлы в режиме virtual по умолчанию
@@ -151,17 +137,10 @@ def get_real_device_data(device_name: str) -> dict[str, Any]:
             "power": sw_data.get("power", 0.0),
         }
     
-    elif device_name == "co2_sensor" and smart_manager:
-        sensor_data = smart_manager.get_sensor_data()
-        return {
-            "co2": sensor_data.get("co2", 0),
-            "temperature": sensor_data.get("temperature", 0.0),
-            "humidity": sensor_data.get("humidity", 0.0),
-        }
-    
     elif device_name == "climate" and smart_manager:
         sensor_data = smart_manager.get_sensor_data()
         return {
+            "co2": sensor_data.get("co2", 0),
             "temperature": sensor_data.get("temperature", 0.0),
             "humidity": sensor_data.get("humidity", 0.0),
         }
@@ -175,8 +154,8 @@ def convert_real_value(device_name: str, field: str, value: Any) -> Any:
     conversions = config.get("conversions", {})
     
     # Специальные конверсии
-    if field == "state":  # bool -> "ok" | "disabled"
-        return "ok" if value else "disabled"
+    if field == "state":  # реле: bool -> "ON" | "OFF"
+        return "ON" if value else "OFF"
     
     # Кастомные конверсии из конфига
     converter_key = f"{field}_to_{config['mappings'].get(field, field)}"
@@ -186,6 +165,39 @@ def convert_real_value(device_name: str, field: str, value: Any) -> Any:
     return value
 
 
+def get_real_devices_for_node(node_id: str) -> list[str]:
+    """Все реальные устройства, питающие узел (для щитка — реле L1..L8)."""
+    return [name for name, config in REAL_TO_SIM_MAPPING.items() if config["node_id"] == node_id]
+
+
+def build_node_updates(node_id: str) -> dict[str, Any]:
+    """Собирает обновления узла из данных всех его реальных устройств."""
+    updates: dict[str, Any] = {}
+    lines = None
+    for device_name in get_real_devices_for_node(node_id):
+        real_data = get_real_device_data(device_name)
+        if not real_data:
+            continue
+        config = REAL_TO_SIM_MAPPING[device_name]
+        mapped = {
+            sim_field: convert_real_value(device_name, real_field, real_data[real_field])
+            for real_field, sim_field in config["mappings"].items()
+            if sim_field and real_field in real_data
+        }
+        if "line" in config:
+            if lines is None:
+                lines = simulator.get(node_id, "lines")
+            lines[config["line"] - 1].update(mapped)
+        else:
+            updates.update(mapped)
+
+    if lines is not None:
+        updates["lines"] = lines
+        updates["total_power_w"] = round(sum(l["power_w"] for l in lines), 1)
+        updates["lines_on_count"] = sum(1 for l in lines if l["state"] == "ON")
+    return updates
+
+
 def sync_real_to_simulator():
     """
     Обновляет симулятор реальными данными перед каждым tick.
@@ -193,41 +205,17 @@ def sync_real_to_simulator():
     """
     if not simulator:
         return
-    
-    for device_name, config in REAL_TO_SIM_MAPPING.items():
-        node_id = config["node_id"]
-        
-        # Проверяем режим узла
+
+    for node_id in {config["node_id"] for config in REAL_TO_SIM_MAPPING.values()}:
         if node_modes.get(node_id, "virtual") != "real":
             continue
-        
-        # Получаем реальные данные
-        real_data = get_real_device_data(device_name)
-        if not real_data:
-            continue
-        
-        # Маппим и записываем в симулятор
-        updates = {}
-        for real_field, sim_field in config["mappings"].items():
-            if sim_field and real_field in real_data:
-                value = convert_real_value(device_name, real_field, real_data[real_field])
-                updates[sim_field] = value
-        
-        if updates:
-            # Добавляем флаг override
-            updates["control_override_source"] = "real"
-            try:
+        try:
+            updates = build_node_updates(node_id)
+            if updates:
+                updates["control_override_source"] = "real"
                 simulator.update(node_id, **updates)
-            except Exception as e:
-                logger.error(f"Failed to sync {device_name} -> {node_id}: {e}")
-
-
-def get_real_device_for_node(node_id: str) -> str | None:
-    """Находит имя реального устройства по node_id."""
-    for device_name, config in REAL_TO_SIM_MAPPING.items():
-        if config["node_id"] == node_id:
-            return device_name
-    return None
+        except Exception as e:
+            logger.error(f"Failed to sync real devices -> {node_id}: {e}")
 
 
 def is_device_available(device_name: str) -> bool:
@@ -241,7 +229,7 @@ def is_device_available(device_name: str) -> bool:
         return inverter_monitor is not None
     elif device_name.startswith("L"):
         return smart_manager is not None
-    elif device_name in ("co2_sensor", "climate"):
+    elif device_name == "climate":
         return smart_manager is not None
     
     return False
@@ -250,32 +238,35 @@ def is_device_available(device_name: str) -> bool:
 # ================= УПРАВЛЕНИЕ РЕАЛЬНЫМ ЖЕЛЕЗОМ =================
 
 async def send_command_to_real_device(node_id: str, action: str, value: Any = None) -> bool:
-    """Отправляет команду на реальное устройство."""
+    """Отправляет команду на реальное устройство. Сейчас поддерживаются только
+    линии щитка: line_on / line_off / toggle_line с value = номер линии (1..8)."""
     if not REAL_HARDWARE_AVAILABLE or not smart_manager:
         return False
-    
-    device_name = get_real_device_for_node(node_id)
-    if not device_name:
+    if node_id != PANEL_NODE_ID:
         return False
-    
-    # Поддерживаем только управление реле (линиями)
-    if device_name.startswith("L"):
-        if action in ("enable", "start", "reconnect"):
-            new_state = True
-        elif action in ("disable", "stop", "disconnect"):
-            new_state = False
-        elif action == "toggle":
-            current_state = smart_manager.get_switch_state(device_name)
-            new_state = not current_state
-        else:
-            logger.warning(f"Unknown action {action} for device {device_name}")
-            return False
-        
-        # Отправляем команду на реле (блокирующий вызов в отдельном потоке)
-        success = await asyncio.to_thread(smart_manager.set_switch, device_name, new_state)
-        return success
-    
-    return False
+
+    line = value.get("line") if isinstance(value, dict) else value
+    try:
+        device_name = f"L{int(line)}"
+    except (TypeError, ValueError):
+        logger.warning(f"Command {action} for {node_id}: invalid line {value!r}")
+        return False
+    if device_name not in REAL_TO_SIM_MAPPING:
+        return False
+
+    action = action.lower()
+    if action in ("line_on", "enable_line"):
+        new_state = True
+    elif action in ("line_off", "disable_line"):
+        new_state = False
+    elif action == "toggle_line":
+        new_state = not smart_manager.get_switch_state(device_name)
+    else:
+        logger.warning(f"Action {action} is not supported by real device {device_name}")
+        return False
+
+    # Отправляем команду на реле (блокирующий вызов в отдельном потоке)
+    return await asyncio.to_thread(smart_manager.set_switch, device_name, new_state)
 
 
 # ================= ОБРАБОТКА WEBSOCKET КОМАНД =================
@@ -299,8 +290,10 @@ async def handle_control_command(data: dict) -> dict:
             success = await send_command_to_real_device(node_id, action, value)
             
             if success:
-                # Оптимистично обновляем симулятор
-                simulator.control(node_id, action, value, job_name=job_name, duration_s=duration_s)
+                # Реальное состояние придёт со следующей синхронизацией; оптимистично
+                # отражаем команду в симуляторе, если узел её поддерживает
+                if action.lower() != "toggle_line":
+                    simulator.control(node_id, action, value, job_name=job_name, duration_s=duration_s)
                 return {"success": True, "node_id": node_id, "action": action, "mode": "real"}
             else:
                 return {"success": False, "error": "Real device command failed"}
@@ -310,6 +303,9 @@ async def handle_control_command(data: dict) -> dict:
             simulator.control(node_id, action, value, job_name=job_name, duration_s=duration_s)
             return {"success": True, "node_id": node_id, "action": action, "mode": "virtual"}
         
+    except ControlError as e:  # недопустимое действие/значение — ошибка клиента, не сервера
+        logger.warning(f"Control command rejected for {node_id}: {e}")
+        return {"success": False, "error": str(e)}
     except Exception as e:
         logger.exception(f"Control command failed for {node_id}")
         return {"success": False, "error": str(e)}
@@ -335,22 +331,16 @@ async def handle_switch_mode(data: dict) -> dict:
         
         elif new_mode == "real":
             # Virtual → Real: проверяем доступность и синхронизируем
-            device_name = get_real_device_for_node(node_id)
-            if not device_name:
+            devices = get_real_devices_for_node(node_id)
+            if not devices:
                 return {"success": False, "error": f"No real device mapped to {node_id}"}
-            
-            if not is_device_available(device_name):
-                return {"success": False, "error": f"Real device {device_name} not available"}
-            
+
+            unavailable = [d for d in devices if not is_device_available(d)]
+            if unavailable:
+                return {"success": False, "error": f"Real devices not available: {unavailable}"}
+
             # Синхронизируем симулятор с реальностью
-            real_data = get_real_device_data(device_name)
-            config = REAL_TO_SIM_MAPPING[device_name]
-            updates = {}
-            for real_field, sim_field in config["mappings"].items():
-                if sim_field and real_field in real_data:
-                    value = convert_real_value(device_name, real_field, real_data[real_field])
-                    updates[sim_field] = value
-            
+            updates = build_node_updates(node_id)
             if updates:
                 updates["control_override_source"] = "real"
                 simulator.update(node_id, **updates)
@@ -487,6 +477,8 @@ async def handle_client(websocket):
                     response = await handle_stop_crisis(data)
                 elif msg_type == "time_control":
                     response = await handle_time_control(data)
+                elif msg_type == "describe_nodes":
+                    response = {"success": True, "nodes": simulator.describe_nodes()}
                 else:
                     response = {"success": False, "error": f"Unknown message type: {msg_type}"}
                 

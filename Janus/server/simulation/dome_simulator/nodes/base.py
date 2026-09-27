@@ -22,6 +22,7 @@ class BaseNode(ABC):
     """Контракт, обязательный для любого узла купола."""
 
     category: str = "generic"  # переопределяется в подклассах: "power", "climate", ...
+    code_name: str = "generic"  # выставляется декоратором register_node_type
 
     def __init__(self, node_id: str) -> None:
         self.node_id = node_id
@@ -65,8 +66,9 @@ class BaseNode(ABC):
 class NodeRegistry:
     """Хранит живые инстансы узлов и синхронизирует их появление/удаление со StateStore."""
 
-    def __init__(self, store: StateStore) -> None:
+    def __init__(self, store: StateStore, environment: Any = None) -> None:
         self._store = store
+        self._environment = environment
         self._nodes: dict[str, BaseNode] = {}
         self._lock = threading.RLock()
 
@@ -74,6 +76,10 @@ class NodeRegistry:
         with self._lock:
             if node.node_id in self._nodes:
                 raise ValueError(f"Узел с id={node.node_id!r} уже зарегистрирован")
+            # Узлы песочницы генерируют данные из общей модели окружения
+            bind = getattr(node, "bind_environment", None)
+            if bind is not None and self._environment is not None:
+                bind(self._environment)
             self._nodes[node.node_id] = node
             self._store.register_node(node.node_id, node.get_state())
 
@@ -124,6 +130,7 @@ def register_node_type(type_name: str) -> Callable[[Type[BaseNode]], Type[BaseNo
         if type_name in NODE_TYPES:
             raise ValueError(f"Тип узла {type_name!r} уже зарегистрирован")
         NODE_TYPES[type_name] = cls
+        cls.code_name = type_name
         return cls
     return decorator
 
