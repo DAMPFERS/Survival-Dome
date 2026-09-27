@@ -1,333 +1,219 @@
+"""
+Тестовый клиент сервера купола (server_integrated.py).
+
+Сценарий:
+    1. Авторизация ключом (админ или активная команда).
+    2. Первая телеметрия и каталог узлов (describe_nodes) — с учётом роли.
+    3. Разрешённые участнику команды: включение линии щитка, запуск дизеля.
+    4. Команда только для админа (эмуляция срабатывания защиты) — участнику
+       должен прийти отказ.
+    5. Админские запросы (time_control, switch_mode) — участнику отказ.
+
+Запуск:
+    python client_test.py --key <ключ>            # ключ можно задать и в DOME_KEY
+    python client_test.py --key <ключ> --verbose  # печатать телеметрию целиком
+"""
+import argparse
 import asyncio
+import itertools
 import json
 import logging
+import os
 import sys
 from datetime import datetime
 from typing import Any
+
 import websockets
-from websockets.exceptions import ConnectionClosed, WebSocketException
+from websockets.exceptions import ConnectionClosed
 
-# ============================================================
-# CONFIG
-# ============================================================
-HOST = "localhost"
-PORT = 8765
-URI = f"ws://{HOST}:{PORT}"
-
-# Таймаут ожидания ответа сервера
 COMMAND_TIMEOUT = 5.0
-# Сколько ждём первую телеметрию перед отправкой команд
-TELEMETRY_WAIT = 5.0
+TELEMETRY_WAIT = 8.0
 
-# ============================================================
-# LOGGING
-# ============================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# GLOBAL STATE
-# ============================================================
-response_waiters: dict[str, asyncio.Future] = {}
-telemetry_received = asyncio.Event()
-last_telemetry: dict[str, Any] = {}
 
+class DomeTestClient:
+    def __init__(self, websocket, verbose: bool = False) -> None:
+        self.ws = websocket
+        self.verbose = verbose
+        self.role: str | None = None
+        self.telemetry: dict[str, Any] = {}
+        self.telemetry_received = asyncio.Event()
+        self._waiters: dict[str, asyncio.Future] = {}
+        self._ids = itertools.count(1)
 
-# ============================================================
-# TELEMETRY
-# ============================================================
-def print_telemetry(data: dict[str, Any]) -> None:
-    """Вывод телеметрии сервера."""
-    print("\n" + "=" * 70)
-    print("📡 TELEMETRY")
-    print("=" * 70)
+    # ---------------- приём ----------------
 
-    timestamp = data.get("timestamp")
-    if timestamp:
-        try:
-            dt = datetime.fromtimestamp(timestamp)
-            print(f"Time:        {dt}")
-        except Exception:
-            print(f"Timestamp:   {timestamp}")
-
-    payload = data.get("data", data)
-    print(f"Sim time:    {payload.get('sim_time')}")
-    print(f"Time scale:  {payload.get('time_scale')}")
-
-    nodes = payload.get("nodes", {})
-    node_modes = payload.get("node_modes", {})
-    active_crises = payload.get("active_crises", [])
-
-    print("\nNodes:")
-    if isinstance(nodes, dict):
-        for node_id, node_data in nodes.items():
-            mode = node_modes.get(node_id, "?")
-            if isinstance(node_data, dict):
-                print(
-                    f"  {node_id:<22} "
-                    f"mode={mode:<7} "
-                    f"{json.dumps(node_data, ensure_ascii=False)}"
-                )
+    async def receive_loop(self) -> None:
+        async for raw in self.ws:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning("Невалидный JSON: %s", raw)
+                continue
+            msg_type = data.get("type", "")
+            if msg_type == "telemetry":
+                self.telemetry = data
+                self.print_telemetry(data, full=self.verbose or not self.telemetry_received.is_set())
+                self.telemetry_received.set()
+            elif data.get("request_id") in self._waiters:
+                future = self._waiters.pop(data["request_id"])
+                if not future.done():
+                    future.set_result(data)
             else:
-                print(
-                    f"  {node_id:<22} "
-                    f"mode={mode:<7} "
-                    f"{node_data}"
-                )
+                print("\nSERVER MESSAGE:", json.dumps(data, ensure_ascii=False, indent=2))
 
-    print("\nActive crises:")
-    if active_crises:
-        for crisis in active_crises:
-            print(f"  - {crisis}")
-    else:
-        print("  none")
+    @staticmethod
+    def print_telemetry(data: dict[str, Any], full: bool) -> None:
+        payload = data.get("data", {})
+        nodes = payload.get("nodes", {})
+        stamp = datetime.fromtimestamp(data.get("timestamp", 0)).strftime("%H:%M:%S")
+        game = payload.get("game_time", {})
+        print(f"\n📡 TELEMETRY {stamp} role={data.get('role')} nodes={len(nodes)} "
+              f"game=день {game.get('day')}, {game.get('hour')} ч")
+        if not full:
+            return
+        extra = {k: v for k, v in payload.items()
+                 if k not in ("nodes", "environment", "real_devices", "game_time")}
+        print("   поля:", json.dumps(extra, ensure_ascii=False))
+        modes = payload.get("node_modes", {})
+        for node_id, params in nodes.items():
+            mode = modes.get(node_id, "-")
+            print(f"   {node_id:<24} mode={mode:<7} {json.dumps(params, ensure_ascii=False)[:180]}")
 
-    print("=" * 70)
+    # ---------------- запросы ----------------
 
-
-# ============================================================
-# SERVER RESPONSE
-# ============================================================
-def handle_response(data: dict[str, Any]) -> None:
-    """Обработка ответа сервера."""
-    msg_type = data.get("type")
-    if not msg_type:
-        return
-
-    waiter = response_waiters.get(msg_type)
-    if waiter is not None and not waiter.done():
-        waiter.set_result(data)
-        return
-
-    print("\nSERVER RESPONSE (unsolicited):")
-    print(json.dumps(data, ensure_ascii=False, indent=2))
-
-
-# ============================================================
-# RECEIVE LOOP
-# ============================================================
-async def receive_messages(websocket) -> None:
-    """Читает все входящие сообщения."""
-    async for raw_message in websocket:
-        logger.debug("Received: %s", raw_message)
+    async def request(self, data: dict[str, Any], quiet: bool = False) -> dict[str, Any] | None:
+        request_id = f"t{next(self._ids)}"
+        data = {**data, "request_id": request_id}
+        future = asyncio.get_running_loop().create_future()
+        self._waiters[request_id] = future
+        if not quiet:
+            print("\n" + "-" * 70)
+            print("📤 CLIENT -> SERVER:", json.dumps(data, ensure_ascii=False))
+        await self.ws.send(json.dumps(data, ensure_ascii=False))
         try:
-            data = json.loads(raw_message)
-        except json.JSONDecodeError:
-            logger.warning("Получен невалидный JSON: %s", raw_message)
-            continue
-
-        msg_type = data.get("type")
-        if msg_type == "telemetry":
-            global last_telemetry
-            last_telemetry = data
-            print_telemetry(data)
-            if not telemetry_received.is_set():
-                telemetry_received.set()
-        elif msg_type and msg_type.endswith("_response"):
-            handle_response(data)
-        else:
-            print("\nSERVER MESSAGE:")
-            print(json.dumps(data, ensure_ascii=False, indent=2))
-
-
-# ============================================================
-# SEND COMMAND
-# ============================================================
-async def send_command(
-    websocket,
-    data: dict[str, Any],
-) -> dict[str, Any] | None:
-    """Отправляет команду и ждёт подтверждение от сервера."""
-    msg_type = data.get("type")
-    if not msg_type:
-        print("❌ Ошибка: у команды отсутствует type")
-        return None
-
-    response_type = f"{msg_type}_response"
-    loop = asyncio.get_running_loop()
-    future = loop.create_future()
-    response_waiters[response_type] = future
-
-    try:
-        message = json.dumps(data, ensure_ascii=False)
-        print("\n" + "-" * 70)
-        print("📤 CLIENT -> SERVER:")
-        print(json.dumps(data, ensure_ascii=False, indent=2))
-
-        await websocket.send(message)
-
-        try:
-            response = await asyncio.wait_for(
-                future,
-                timeout=COMMAND_TIMEOUT,
-            )
+            response = await asyncio.wait_for(future, timeout=COMMAND_TIMEOUT)
         except asyncio.TimeoutError:
-            print(f"\n⏱ Нет ответа сервера за {COMMAND_TIMEOUT} секунд.")
+            self._waiters.pop(request_id, None)
+            print(f"⏱ Нет ответа сервера за {COMMAND_TIMEOUT} с")
             return None
-
-        print("\n📥 SERVER -> CLIENT:")
-        print(json.dumps(response, ensure_ascii=False, indent=2))
-        print("-" * 70)
+        if not quiet:
+            print("📥 SERVER -> CLIENT:", json.dumps(response, ensure_ascii=False))
         return response
 
-    except ConnectionClosed:
-        print("\n❌ Соединение закрыто сервером.")
-        raise
-    except Exception as e:
-        print(f"\n❌ Ошибка отправки команды: {e}")
-        return None
-    finally:
-        current = response_waiters.get(response_type)
-        if current is future:
-            del response_waiters[response_type]
+    async def authenticate(self, key: str) -> bool:
+        """Авторизация — до запуска receive_loop: ответ читаем напрямую."""
+        await self.ws.send(json.dumps({"type": "auth", "key": key, "request_id": "auth"}))
+        response = json.loads(await asyncio.wait_for(self.ws.recv(), timeout=COMMAND_TIMEOUT + 2))
+        if not response.get("success"):
+            print(f"❌ Авторизация отклонена: {response.get('error')}")
+            return False
+        self.role = response["role"]
+        team = f", команда {response['team']}" if response.get("team") else ""
+        print(f"✅ Авторизован: роль {self.role}{team}")
+        return True
 
 
-# ============================================================
-# TEST SCENARIO
-# ============================================================
-async def run_test_scenario(websocket) -> None:
-    """
-    Автоматический сценарий:
-    1. Ждём первую телеметрию
-    2. Включаем дизель-генератор
-    3. Включаем линию line_1
-    """
-    print("\n" + "#" * 70)
-    print("# TEST SCENARIO START")
-    print("#" * 70)
+results: list[bool] = []
 
-    # Шаг 1: ждём первую телеметрию
+
+def check(title: str, response: dict[str, Any] | None, expect_success: bool) -> None:
+    ok = bool(response) and response.get("success") == expect_success
+    results.append(ok)
+    expectation = "успех" if expect_success else "отказ"
+    detail = "" if ok or not response else f", получено: {response.get('error') or 'успех'}"
+    print(f"{'✅' if ok else '❌'} {title}: ожидался {expectation}{detail}")
+
+
+async def run_scenario(client: DomeTestClient) -> None:
+    is_admin = client.role == "admin"
+
     print("\n⏳ Ожидание первой телеметрии...")
     try:
-        await asyncio.wait_for(
-            telemetry_received.wait(),
-            timeout=TELEMETRY_WAIT,
-        )
-        print("✅ Телеметрия получена.")
+        await asyncio.wait_for(client.telemetry_received.wait(), timeout=TELEMETRY_WAIT)
     except asyncio.TimeoutError:
-        print("⚠️ Телеметрия не пришла вовремя, продолжаем...")
+        print("⚠️ Телеметрия не пришла вовремя")
 
-    # Дадим ещё немного времени, чтобы телеметрия успела отрисоваться
-    await asyncio.sleep(0.5)
+    print("\n" + "#" * 70 + "\n# Каталог узлов\n" + "#" * 70)
+    catalog = await client.request({"type": "describe_nodes"}, quiet=True)
+    for node in (catalog or {}).get("nodes", []):
+        mode = f" [{node['mode']}]" if "mode" in node else ""
+        print(f"  {node['node_id']:<24}{mode:<10} {node['title']}: {', '.join(node['controls']) or '—'}")
 
-    # Шаг 2: включаем дизель-генератор
-    print("\n" + "#" * 70)
-    print("# STEP 2: Запуск дизель-генератора (diesel_1)")
-    print("#" * 70)
-    diesel_response = await send_command(
-        websocket,
-        {
-            "type": "control",
-            "node_id": "diesel_1",
-            "action": "start",
-        },
-    )
-    if diesel_response and diesel_response.get("success"):
-        print("✅ Дизель-генератор успешно запущен.")
+    print("\n" + "#" * 70 + "\n# Разрешённые участнику команды\n" + "#" * 70)
+    check("Включение линии 1 щитка",
+          await client.request({"type": "control", "node_id": "smart_panel_01", "action": "line_on", "value": 1}),
+          expect_success=True)
+    check("Запуск дизель-генератора",
+          await client.request({"type": "control", "node_id": "dizel_1", "action": "turn_on"}),
+          expect_success=True)
+    check("Недопустимое значение (линия 42)",
+          await client.request({"type": "control", "node_id": "smart_panel_01", "action": "line_on", "value": 42}),
+          expect_success=False)
+
+    print("\n" + "#" * 70 + "\n# Команды и запросы только для админа\n" + "#" * 70)
+    check("Эмуляция срабатывания защиты линии 8",
+          await client.request({"type": "control", "node_id": "smart_panel_01",
+                                "action": "emulate_protection_trip", "value": {"line": 8}}),
+          expect_success=is_admin)
+    panel = client.telemetry.get("data", {}).get("nodes", {}).get("smart_panel_01", {})
+    check("Служебные параметры (control_*) видны только админу",
+          {"success": is_admin == ("control_override_source" in panel)}, expect_success=True)
+    check("Ускорение времени x2",
+          await client.request({"type": "time_control", "action": "set_scale", "value": 2.0}),
+          expect_success=is_admin)
+    if is_admin:
+        await client.request({"type": "time_control", "action": "set_scale", "value": 1.0})
+        response = await client.request({"type": "switch_mode", "node_id": "printer_3d_01", "mode": "real"})
+        print("ℹ️ Переключение принтера в real:",
+              "выполнено" if response and response.get("success") else f"нет ({(response or {}).get('error')})")
     else:
-        print("❌ Не удалось запустить дизель-генератор.")
+        check("Переключение режима узла",
+              await client.request({"type": "switch_mode", "node_id": "printer_3d_01", "mode": "real"}),
+              expect_success=False)
 
-    # Дадим симулятору тикнуть, чтобы состояние обновилось
-    await asyncio.sleep(5.0)
-
-    # Шаг 3: включаем линию line_1
+    await asyncio.sleep(TELEMETRY_WAIT / 2)
     print("\n" + "#" * 70)
-    print("# STEP 3: Включение линии line_1")
-    print("#" * 70)
-    line_response = await send_command(
-        websocket,
-        {
-            "type": "control",
-            "node_id": "line_1",
-            "action": "enable",
-        },
-    )
-    if line_response and line_response.get("success"):
-        print("✅ Линия line_1 успешно включена.")
-    else:
-        print("❌ Не удалось включить линию line_1.")
-
-    # Дадим симулятору отрисовать новое состояние
-    await asyncio.sleep(5.0)
-
-    print("\n" + "#" * 70)
-    print("# TEST SCENARIO COMPLETE")
+    print(f"# TEST SCENARIO COMPLETE: {sum(results)}/{len(results)} проверок пройдено")
     print("#" * 70)
 
 
-# ============================================================
-# CONNECTION SESSION
-# ============================================================
-async def run_session(websocket) -> None:
-    """Работа с одним WebSocket-соединением."""
-    receiver_task = asyncio.create_task(receive_messages(websocket))
-    scenario_task = asyncio.create_task(run_test_scenario(websocket))
-
-    done, pending = await asyncio.wait(
-        [receiver_task, scenario_task],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-
-    for task in pending:
-        task.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
-
-    for task in done:
-        exception = task.exception()
-        if exception is not None:
-            raise exception
-
-
-# ============================================================
-# MAIN CLIENT
-# ============================================================
-async def run_client() -> None:
-    attempt = 0
-    while True:
-        try:
-            attempt += 1
-            logger.info("Подключение к %s (попытка %d)...", URI, attempt)
-            async with websockets.connect(
-                URI,
-                ping_interval=None,
-                close_timeout=3,
-                max_size=10_000_000,
-            ) as websocket:
-                logger.info("✅ Успешно подключено к серверу.")
-                attempt = 0
-                await run_session(websocket)
-                # Сценарий выполнен — выходим
-                return
-        except KeyboardInterrupt:
-            raise
-        except ConnectionClosed as e:
-            logger.warning("Соединение закрыто: code=%s reason=%s", e.code, e.reason)
-        except WebSocketException as e:
-            logger.warning("WebSocket ошибка: %s", e)
-        except OSError as e:
-            logger.warning("Ошибка сети: %s", e)
-        except Exception as e:
-            logger.exception("Неожиданная ошибка клиента: %s", e)
-
-        for future in response_waiters.values():
-            if not future.done():
-                future.cancel()
-        response_waiters.clear()
-        telemetry_received.clear()
-
-        logger.info("Повторное подключение через 3.0 сек...")
-        await asyncio.sleep(3.0)
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
-if __name__ == "__main__":
+async def run_client(uri: str, key: str, verbose: bool) -> int:
+    logger.info("Подключение к %s...", uri)
     try:
-        asyncio.run(run_client())
+        async with websockets.connect(uri, ping_interval=None, close_timeout=3, max_size=10_000_000) as ws:
+            client = DomeTestClient(ws, verbose)
+            if not await client.authenticate(key):
+                return 1
+            receiver = asyncio.create_task(client.receive_loop())
+            scenario = asyncio.create_task(run_scenario(client))
+            done, pending = await asyncio.wait([receiver, scenario], return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                if task.exception():
+                    raise task.exception()
+            return 0 if all(results) else 2
+    except ConnectionClosed as e:
+        logger.error("Соединение закрыто: code=%s reason=%s", e.code, e.reason)
+    except OSError as e:
+        logger.error("Ошибка сети: %s", e)
+    return 1
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Тестовый клиент сервера купола")
+    parser.add_argument("--host", default=os.getenv("DOME_HOST", "localhost"))
+    parser.add_argument("--port", type=int, default=int(os.getenv("DOME_PORT", "8765")))
+    parser.add_argument("--key", default=os.getenv("DOME_KEY"), help="ключ доступа (или переменная DOME_KEY)")
+    parser.add_argument("--verbose", action="store_true", help="печатать каждую телеметрию целиком")
+    args = parser.parse_args()
+    if not args.key:
+        parser.error("нужен ключ доступа: --key или переменная окружения DOME_KEY")
+    try:
+        sys.exit(asyncio.run(run_client(f"ws://{args.host}:{args.port}", args.key, args.verbose)))
     except KeyboardInterrupt:
         print("\nКлиент остановлен.")
-        sys.exit(0)

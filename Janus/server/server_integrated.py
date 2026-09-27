@@ -1,570 +1,496 @@
 #!/usr/bin/env python3
 """
-WebSocket-сервер для телеметрии купола (Интегрированная версия с симулятором).
-Объединяет реальное оборудование и виртуальные узлы симулятора.
-Поддерживает hot-swap между real и virtual данными на лету.
+WebSocket-сервер купола: симулятор + реальное оборудование + авторизация.
+
+Протокол (JSON-сообщения):
+    1. Первое сообщение клиента — {"type": "auth", "key": "<ключ>"}.
+       Ответ: {"type": "auth_response", "success": true, "role": "admin"|"team", "team": N}.
+       Без авторизации за AUTH_TIMEOUT секунд или с неверным ключом соединение закрывается (4401).
+    2. Далее сервер каждые TELEMETRY_INTERVAL секунд шлёт {"type": "telemetry", ...}.
+       Состав зависит от роли: админ получает всё, участник — только разрешённое
+       политикой доступа (authorization/access_policy.json).
+    3. Запросы клиента: {"type": "<тип>", "request_id": "...", ...}.
+       Ответ: {"type": "<тип>_response", "request_id": "...", "success": ..., ...}.
+
+Типы запросов:
+    все роли:  control, describe_nodes, ping
+    только админ: switch_mode, trigger_crisis, stop_crisis, time_control,
+                  set_active_team, get_policy, set_participant_access, reload_policy
+
+Реальные устройства (real_devices.py) синхронизируются в фоне. Узел в режиме
+"real" берёт данные с железа, команды уходят на железо. Если DOME_AUTO_REAL=1,
+узел автоматически переходит в "real", как только устройство стало доступно
+(пока админ явно не переключил его в "virtual").
 """
+from __future__ import annotations
+
 import asyncio
+import itertools
 import json
 import logging
+import os
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal, Optional
+
 from websockets import serve
+from websockets.exceptions import ConnectionClosed
 
-# Добавляем путь к директории simulation для импорта dome_simulator как пакета
-simulation_path = Path(__file__).parent / "simulation"
-sys.path.insert(0, str(simulation_path))
+SERVER_DIR = Path(__file__).parent
+sys.path.insert(0, str(SERVER_DIR / "simulation"))
+sys.path.insert(0, str(SERVER_DIR))
 
-# Импорты модулей оборудования
-try:
-    from solar.solar_inverter import InverterMonitor
-    from smart_rele.smart_devices import (
-        SmartDeviceManager, 
-        L1, L2, L3, L4, L5, L6, L7, L8, 
-        CO2_SENSOR
-    )
-    REAL_HARDWARE_AVAILABLE = True
-except ImportError as e:
-    logging.warning(f"Real hardware modules not available: {e}")
-    REAL_HARDWARE_AVAILABLE = False
-    InverterMonitor = None
-    SmartDeviceManager = None
-
-# Импорт симулятора
-from dome_simulator import ControlError, create_dome_simulator
+from authorization.access_policy import ROLE_ADMIN, ROLE_TEAM, AccessPolicy, PolicyError  # noqa: E402
+from authorization.protector import Protector  # noqa: E402
+from dome_simulator import ControlError, create_dome_simulator  # noqa: E402
+from real_devices import RealCommandError, build_adapters  # noqa: E402
 
 # ================= НАСТРОЙКА ЛОГИРОВАНИЯ =================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S"
+    datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("IntegratedServer")
 
 # ================= КОНФИГУРАЦИЯ =================
+HOST = os.getenv("DOME_HOST", "0.0.0.0")
+PORT = int(os.getenv("DOME_PORT", "8765"))
+TELEMETRY_INTERVAL = float(os.getenv("DOME_TELEMETRY_INTERVAL", "2.0"))
+REAL_SYNC_INTERVAL = float(os.getenv("DOME_REAL_SYNC_INTERVAL", "1.0"))
+AUTH_TIMEOUT = float(os.getenv("DOME_AUTH_TIMEOUT", "10.0"))
+REAL_COMMAND_TIMEOUT = float(os.getenv("DOME_REAL_COMMAND_TIMEOUT", "10.0"))
+ACTIVE_TEAM = int(os.getenv("DOME_ACTIVE_TEAM", "1"))           # 1..4
+AUTO_REAL = os.getenv("DOME_AUTO_REAL", "1") not in ("0", "false", "False", "")
+KEYS_CONFIG = os.getenv("DOME_KEYS_CONFIG", str(SERVER_DIR / "authorization" / "keys_config.json"))
+POLICY_FILE = os.getenv("DOME_POLICY_FILE", str(SERVER_DIR / "authorization" / "access_policy.json"))
 
-# Маппинг реальных устройств на узлы симулятора (узлы песочницы, dome_sandbox_nodes.md).
-# "line" — реле умного щитка: несколько устройств пишут в одну линию списка lines узла.
-PANEL_NODE_ID = "smart_panel_01"
+# Действия, которые есть только у реального устройства (в симуляторе их нет)
+REAL_ONLY_ACTIONS = {"cnc_01": ("probe_z",)}
 
-REAL_TO_SIM_MAPPING = {
-    # Реальное устройство -> конфигурация маппинга
-    "inverter": {
-        "node_id": "solar_inverter_01",
-        "mappings": {
-            "generated_power_kw": "pv_power_w",   # real_field -> sim_field
-            "battery_soc_percent": "battery_soc_pct",
-        },
-        "conversions": {
-            "generated_power_kw_to_pv_power_w": lambda kw: round(kw * 1000.0, 1),
-        },
-    },
-    "battery": {
-        "node_id": "battery_01",
-        "mappings": {"battery_soc_percent": "soc_pct"},
-    },
-    **{
-        f"L{n}": {"node_id": PANEL_NODE_ID, "line": n, "mappings": {"state": "state", "power": "power_w"}}
-        for n in range(1, 9)
-    },
-    "climate": {
-        "node_id": "climate_sensor_01",
-        "mappings": {"co2": "co2_ppm", "temperature": "temperature_c", "humidity": "humidity_pct"},
-    },
-}
+CLOSE_UNAUTHORIZED = 4401
+CLOSE_REVOKED = 4403
 
-# Маппинг ID канала (для обратной совместимости с фронтендом)
-CHANNEL_MAP = {
-    1: "L1", 2: "L2", 3: "L3", 4: "L4",
-    5: "L5", 6: "L6", 7: "L7", 8: "L8"
-}
+Mode = Literal["real", "virtual"]
 
-# Список конфигураций для менеджера (если железо доступно)
-if REAL_HARDWARE_AVAILABLE:
-    SWITCH_CONFIGS = [L1, L2, L3, L4, L5, L6, L7, L8]
-else:
-    SWITCH_CONFIGS = []
 
-# ================= СОСТОЯНИЕ СЕРВЕРА =================
+class RequestError(Exception):
+    """Ошибка запроса клиента — уходит в ответ как error, без трассировки в логе."""
 
-# Глобальные экземпляры
-simulator = None
-inverter_monitor = None
-smart_manager = None
 
-# Режимы узлов: "real" или "virtual"
-node_modes: dict[str, Literal["real", "virtual"]] = {}
+@dataclass(eq=False)
+class Session:
+    websocket: Any
+    role: str
+    team: Optional[int]
+    id: int
+    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-# Инициализация режимов по умолчанию (если железо доступно - используем real)
-def init_default_modes():
-    global node_modes
-    if REAL_HARDWARE_AVAILABLE:
-        node_modes = {
-            "solar_inverter_01": "real",
-            "battery_01": "real",
-            PANEL_NODE_ID: "real",
-            "climate_sensor_01": "real",
+    async def send(self, message: dict[str, Any]) -> None:
+        async with self.send_lock:
+            await self.websocket.send(json.dumps(message, ensure_ascii=False, default=str))
+
+    def __str__(self) -> str:
+        who = "admin" if self.role == ROLE_ADMIN else f"team{self.team}"
+        return f"#{self.id}({who})"
+
+
+Handler = Callable[[Session, dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+class DomeServer:
+    def __init__(self) -> None:
+        self.protector = Protector(KEYS_CONFIG)
+        self.protector.setActiveTeamKey(ACTIVE_TEAM - 1)
+        self.policy = AccessPolicy(POLICY_FILE)
+
+        self.simulator = create_dome_simulator(tick_interval=4.0, time_scale=1.0)
+        self.adapters = build_adapters(lambda: self.simulator.get("smart_panel_01", "lines"))
+        self.node_modes: dict[str, Mode] = {node_id: "virtual" for node_id in self.adapters}
+        self.manual_virtual: set[str] = set()  # узлы, которые админ явно держит виртуальными
+
+        self.sessions: set[Session] = set()
+        self._session_ids = itertools.count(1)
+        self._sync_task: Optional[asyncio.Task] = None
+
+        self.handlers: dict[str, tuple[Handler, set[str]]] = {
+            "ping": (self.handle_ping, {ROLE_ADMIN, ROLE_TEAM}),
+            "control": (self.handle_control, {ROLE_ADMIN, ROLE_TEAM}),
+            "describe_nodes": (self.handle_describe_nodes, {ROLE_ADMIN, ROLE_TEAM}),
+            "switch_mode": (self.handle_switch_mode, {ROLE_ADMIN}),
+            "trigger_crisis": (self.handle_trigger_crisis, {ROLE_ADMIN}),
+            "stop_crisis": (self.handle_stop_crisis, {ROLE_ADMIN}),
+            "time_control": (self.handle_time_control, {ROLE_ADMIN}),
+            "set_active_team": (self.handle_set_active_team, {ROLE_ADMIN}),
+            "get_policy": (self.handle_get_policy, {ROLE_ADMIN}),
+            "set_participant_access": (self.handle_set_participant_access, {ROLE_ADMIN}),
+            "reload_policy": (self.handle_reload_policy, {ROLE_ADMIN}),
         }
-    else:
-        node_modes = {}  # Все узлы в режиме virtual по умолчанию
 
-# ================= ЛОГИКА РАБОТЫ С РЕАЛЬНЫМ ЖЕЛЕЗОМ =================
+    # ================= ЖИЗНЕННЫЙ ЦИКЛ =================
 
-def get_real_device_data(device_name: str) -> dict[str, Any]:
-    """Получает данные с реального устройства."""
-    if not REAL_HARDWARE_AVAILABLE:
-        return {}
-    
-    if device_name == "inverter" and inverter_monitor:
-        snap = inverter_monitor.get_snapshot()
-        return {
-            "generated_power_kw": snap.generated_power_kw or 0.0,
-            "battery_soc_percent": snap.battery_soc_percent or 0.0,
-            "is_online": snap.is_online,
+    async def start(self) -> None:
+        self.simulator.start()
+        logger.info("Dome simulator started")
+        for adapter in self.adapters.values():
+            try:
+                await asyncio.to_thread(adapter.start)
+            except Exception as e:
+                logger.error("Не удалось запустить %s: %s", adapter.title, e)
+        logger.info("Real device adapters: %s", ", ".join(
+            f"{nid} ({a.title})" for nid, a in self.adapters.items()) or "нет")
+        self._sync_task = asyncio.create_task(self._real_sync_loop())
+
+    async def stop(self) -> None:
+        if self._sync_task:
+            self._sync_task.cancel()
+        self.simulator.stop()
+        for adapter in self.adapters.values():
+            try:
+                await asyncio.to_thread(adapter.stop)
+            except Exception as e:
+                logger.error("Ошибка остановки %s: %s", adapter.title, e)
+        logger.info("Server stopped")
+
+    # ================= РЕАЛЬНОЕ ОБОРУДОВАНИЕ =================
+
+    async def _real_sync_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.to_thread(self.sync_real_to_simulator)
+            except Exception:
+                logger.exception("Ошибка синхронизации реальных устройств")
+            await asyncio.sleep(REAL_SYNC_INTERVAL)
+
+    def sync_real_to_simulator(self) -> None:
+        """Переносит данные реальных устройств в узлы, работающие в режиме real.
+        Выполняется в отдельном потоке (опрос драйверов может блокировать)."""
+        for node_id, adapter in self.adapters.items():
+            if (self.node_modes[node_id] == "virtual" and AUTO_REAL
+                    and node_id not in self.manual_virtual and adapter.available()):
+                self.node_modes[node_id] = "real"
+                logger.info("%s: устройство доступно — узел переведён в REAL", node_id)
+            if self.node_modes[node_id] == "real":
+                self.sync_node(node_id)
+
+    def sync_node(self, node_id: str) -> None:
+        try:
+            updates = self.adapters[node_id].read()
+            if updates:
+                updates["control_override_source"] = "real"
+                self.simulator.update(node_id, **updates)
+        except Exception as e:
+            logger.error("Синхронизация %s не удалась: %s", node_id, e)
+
+    # ================= ТЕЛЕМЕТРИЯ =================
+
+    def build_telemetry(self, session: Session) -> dict[str, Any]:
+        snap = self.simulator.snapshot()
+        env = self.simulator.environment_snapshot()
+        tc = self.simulator.time_controller
+        full = {
+            "nodes": snap["nodes"],
+            "game_time": {"day": env["outdoor"]["day"], "hour": round(env["outdoor"]["hour"], 2)},
+            "node_modes": dict(self.node_modes),
+            "active_crises": self.simulator.active_crises(),
+            "sim_time": tc.sim_time,
+            "time_scale": tc.time_scale,
+            "paused": tc.is_paused,
+            "environment": env,
+            "active_team": (self.protector.getActiveTeamIndex() or 0) + 1,
+            "real_devices": {nid: a.status() for nid, a in self.adapters.items()},
         }
-    
-    elif device_name == "battery" and inverter_monitor:
-        snap = inverter_monitor.get_snapshot()
-        return {
-            "battery_soc_percent": snap.battery_soc_percent or 0.0,
-        }
-    
-    elif device_name.startswith("L") and smart_manager:
-        sw_data = smart_manager.get_all_switch_data().get(device_name, {})
-        return {
-            "state": sw_data.get("state", False),
-            "power": sw_data.get("power", 0.0),
-        }
-    
-    elif device_name == "climate" and smart_manager:
-        sensor_data = smart_manager.get_sensor_data()
-        return {
-            "co2": sensor_data.get("co2", 0),
-            "temperature": sensor_data.get("temperature", 0.0),
-            "humidity": sensor_data.get("humidity", 0.0),
-        }
-    
-    return {}
-
-
-def convert_real_value(device_name: str, field: str, value: Any) -> Any:
-    """Применяет конверсию значения перед записью в симулятор."""
-    config = REAL_TO_SIM_MAPPING.get(device_name, {})
-    conversions = config.get("conversions", {})
-    
-    # Специальные конверсии
-    if field == "state":  # реле: bool -> "ON" | "OFF"
-        return "ON" if value else "OFF"
-    
-    # Кастомные конверсии из конфига
-    converter_key = f"{field}_to_{config['mappings'].get(field, field)}"
-    if converter_key in conversions:
-        return conversions[converter_key](value)
-    
-    return value
-
-
-def get_real_devices_for_node(node_id: str) -> list[str]:
-    """Все реальные устройства, питающие узел (для щитка — реле L1..L8)."""
-    return [name for name, config in REAL_TO_SIM_MAPPING.items() if config["node_id"] == node_id]
-
-
-def build_node_updates(node_id: str) -> dict[str, Any]:
-    """Собирает обновления узла из данных всех его реальных устройств."""
-    updates: dict[str, Any] = {}
-    lines = None
-    for device_name in get_real_devices_for_node(node_id):
-        real_data = get_real_device_data(device_name)
-        if not real_data:
-            continue
-        config = REAL_TO_SIM_MAPPING[device_name]
-        mapped = {
-            sim_field: convert_real_value(device_name, real_field, real_data[real_field])
-            for real_field, sim_field in config["mappings"].items()
-            if sim_field and real_field in real_data
-        }
-        if "line" in config:
-            if lines is None:
-                lines = simulator.get(node_id, "lines")
-            lines[config["line"] - 1].update(mapped)
+        if session.role == ROLE_ADMIN:
+            data = full
         else:
-            updates.update(mapped)
+            fields = self.policy.telemetry_fields(session.role) or set()
+            data = {"nodes": self.policy.filter_nodes(session.role, snap["nodes"])}
+            data.update({k: full[k] for k in fields if k in full and k != "nodes"})
+        return {"type": "telemetry", "timestamp": snap["timestamp"], "role": session.role, "data": data}
 
-    if lines is not None:
-        updates["lines"] = lines
-        updates["total_power_w"] = round(sum(l["power_w"] for l in lines), 1)
-        updates["lines_on_count"] = sum(1 for l in lines if l["state"] == "ON")
-    return updates
+    async def _telemetry_loop(self, session: Session) -> None:
+        try:
+            while True:
+                await session.send(self.build_telemetry(session))
+                await asyncio.sleep(TELEMETRY_INTERVAL)
+        except ConnectionClosed:
+            pass
+
+    # ================= ОБРАБОТЧИКИ ЗАПРОСОВ =================
+
+    async def handle_ping(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        return {"success": True}
+
+    def _require_node(self, session: Session, node_id: Any) -> str:
+        if not isinstance(node_id, str) or node_id not in self.simulator.node_ids() \
+                or not self.policy.node_visible(session.role, node_id):
+            raise RequestError(f"Неизвестный узел: {node_id!r}")  # скрытый узел не выдаём
+        return node_id
+
+    async def handle_control(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        node_id = self._require_node(session, data.get("node_id"))
+        action = data.get("action")
+        if not isinstance(action, str) or not action.strip():
+            raise RequestError("Не указано действие (action)")
+        value = data.get("value")
+        if data.get("job_name") is not None and value is None:  # совместимость со старым API
+            value = {"file_name": data["job_name"]}
+            if data.get("duration_s") is not None:
+                value["duration_s"] = data["duration_s"]
+
+        canonical = self.simulator.resolve_action(node_id, action) or action.strip().lower()
+        if not self.policy.can_control(session.role, node_id, canonical):
+            allowed = self._allowed_controls(session, node_id)
+            raise RequestError(f"Действие {action!r} для {node_id} недоступно. "
+                               f"Разрешено: {allowed or 'ничего'}")
+
+        mode = self.node_modes.get(node_id, "virtual")
+        if mode == "real":
+            try:
+                await asyncio.wait_for(self.adapters[node_id].execute(canonical, value), REAL_COMMAND_TIMEOUT)
+            except RealCommandError as e:
+                raise RequestError(str(e)) from None
+            except asyncio.TimeoutError:
+                raise RequestError(f"Реальное устройство не ответило за {REAL_COMMAND_TIMEOUT:.0f} с") from None
+            await asyncio.to_thread(self.sync_node, node_id)  # сразу показываем результат
+        else:
+            try:
+                self.simulator.control(node_id, action, value)
+            except ControlError as e:
+                if session.role != ROLE_ADMIN and "Доступно:" in str(e):
+                    raise RequestError(f"Узел {node_id} не поддерживает действие {action!r}. "
+                                       f"Разрешено: {self._allowed_controls(session, node_id)}") from None
+                raise RequestError(str(e)) from None
+
+        logger.info("%s control %s.%s(%r) [%s]", session, node_id, canonical, value, mode)
+        return {"success": True, "node_id": node_id, "action": action, "mode": mode}
+
+    def _node_controls(self, node_id: str) -> list[str]:
+        return next(n["controls"] for n in self.simulator.describe_nodes() if n["node_id"] == node_id)
+
+    def _allowed_controls(self, session: Session, node_id: str) -> list[str]:
+        return self.policy.allowed_actions(session.role, node_id, self._node_controls(node_id))
+
+    async def handle_describe_nodes(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        nodes = []
+        for info in self.simulator.describe_nodes():
+            node_id = info["node_id"]
+            if not self.policy.node_visible(session.role, node_id):
+                continue
+            if session.role == ROLE_ADMIN:
+                adapter = self.adapters.get(node_id)
+                info["mode"] = self.node_modes.get(node_id, "virtual")
+                info["real_device"] = adapter.status() if adapter else None
+                info["real_only_controls"] = list(REAL_ONLY_ACTIONS.get(node_id, ()))
+            else:
+                allowed = self.policy.allowed_actions(session.role, node_id, info["controls"])
+                info["controls"] = allowed
+                info["control_aliases"] = {k: v for k, v in info["control_aliases"].items() if k in allowed}
+            nodes.append(info)
+        return {"success": True, "nodes": nodes}
+
+    async def handle_switch_mode(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        node_id, new_mode = data.get("node_id"), data.get("mode")
+        if new_mode not in ("real", "virtual"):
+            raise RequestError('mode должен быть "real" или "virtual"')
+        adapter = self.adapters.get(node_id)
+        if adapter is None:
+            raise RequestError(f"Для узла {node_id!r} нет реального устройства")
+
+        if new_mode == "virtual":
+            self.node_modes[node_id] = "virtual"
+            self.manual_virtual.add(node_id)
+            self.simulator.set(node_id, "control_override_source", None)
+        else:
+            if not await asyncio.to_thread(adapter.available):
+                raise RequestError(f"Реальное устройство {adapter.title} недоступно")
+            self.manual_virtual.discard(node_id)
+            self.node_modes[node_id] = "real"
+            await asyncio.to_thread(self.sync_node, node_id)
+        logger.info("%s switched %s to %s", session, node_id, new_mode.upper())
+        return {"success": True, "node_id": node_id, "mode": new_mode}
+
+    async def handle_trigger_crisis(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        name = data.get("crisis_name")
+        if not name:
+            raise RequestError("Не указан crisis_name")
+        try:
+            self.simulator.trigger_crisis(name, data.get("params"))
+        except KeyError as e:
+            raise RequestError(str(e.args[0] if e.args else e)) from None
+        return {"success": True, "crisis_name": name}
+
+    async def handle_stop_crisis(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        name = data.get("crisis_name")
+        if not name:
+            raise RequestError("Не указан crisis_name")
+        self.simulator.stop_crisis(name)
+        return {"success": True, "crisis_name": name}
+
+    async def handle_time_control(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        action = data.get("action")
+        if action == "set_scale":
+            try:
+                self.simulator.set_time_scale(float(data.get("value")))
+            except (TypeError, ValueError) as e:
+                raise RequestError(f"Некорректный time_scale: {e}") from None
+        elif action == "pause":
+            self.simulator.pause()
+        elif action == "resume":
+            self.simulator.resume()
+        else:
+            raise RequestError(f"Неизвестное действие времени: {action!r} (set_scale, pause, resume)")
+        return {"success": True, "action": action}
+
+    async def handle_set_active_team(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        try:
+            team = int(data.get("team"))
+            self.protector.setActiveTeamKey(team - 1)
+        except (TypeError, ValueError):
+            raise RequestError("team: ожидался номер команды 1..4") from None
+        revoked = [s for s in self.sessions if s.role == ROLE_TEAM and s.team != team]
+        for s in revoked:
+            asyncio.create_task(self._revoke(s, f"Активная команда сменилась на {team}"))
+        logger.info("%s set active team %d (отключено сессий: %d)", session, team, len(revoked))
+        return {"success": True, "team": team, "revoked_sessions": len(revoked)}
+
+    async def _revoke(self, session: Session, reason: str) -> None:
+        try:
+            await session.send({"type": "session_revoked", "reason": reason})
+            await session.websocket.close(CLOSE_REVOKED, "session revoked")
+        except ConnectionClosed:
+            pass
+
+    async def handle_get_policy(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        return {"success": True, "policy": self.policy.snapshot()}
+
+    async def handle_set_participant_access(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        """{"node_id": "...", "actions": [...] | "*", "visible": bool, "hidden_params": [...]}"""
+        node_id = data.get("node_id")
+        if node_id not in self.simulator.node_ids():
+            raise RequestError(f"Неизвестный узел: {node_id!r}")
+        changes = {k: data[k] for k in ("actions", "visible", "hidden_params") if k in data}
+        if not changes:
+            raise RequestError("Нужно указать хотя бы одно из: actions, visible, hidden_params")
+        if isinstance(changes.get("actions"), list):
+            valid = set(self._node_controls(node_id)) | set(REAL_ONLY_ACTIONS.get(node_id, ()))
+            unknown = [a for a in changes["actions"] if not isinstance(a, str) or a.lower() not in valid]
+            if unknown:
+                raise RequestError(f"Неизвестные действия {unknown}. Доступно: {sorted(valid)}")
+        try:
+            rule = self.policy.update_node(node_id, changes)
+        except (PolicyError, OSError) as e:
+            raise RequestError(f"Политика не изменена: {e}") from None
+        logger.info("%s changed participant access for %s: %s", session, node_id, changes)
+        return {"success": True, "node_id": node_id, "rule": rule}
+
+    async def handle_reload_policy(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        if not self.policy.reload():
+            raise RequestError("Файл политики некорректен — оставлена прежняя версия (см. лог сервера)")
+        return {"success": True}
+
+    # ================= СОЕДИНЕНИЯ =================
+
+    async def _authenticate(self, websocket) -> Optional[Session]:
+        try:
+            raw = await asyncio.wait_for(websocket.recv(), timeout=AUTH_TIMEOUT)
+            data = json.loads(raw)
+        except asyncio.TimeoutError:
+            await websocket.close(CLOSE_UNAUTHORIZED, "auth timeout")
+            return None
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+
+        request_id = data.get("request_id") if isinstance(data, dict) else None
+        role = None
+        if isinstance(data, dict) and data.get("type") == "auth":
+            role = self.protector.getRole(data.get("key"))
+        if role is None:
+            logger.warning("Отказ в авторизации: %s", websocket.remote_address)
+            await asyncio.sleep(1.0)  # замедляем перебор ключей
+            await websocket.send(json.dumps({"type": "auth_response", "request_id": request_id,
+                                             "success": False, "error": "Неверный ключ доступа"}))
+            await websocket.close(CLOSE_UNAUTHORIZED, "unauthorized")
+            return None
+
+        team = (self.protector.getActiveTeamIndex() or 0) + 1 if role == ROLE_TEAM else None
+        session = Session(websocket=websocket, role=role, team=team, id=next(self._session_ids))
+        await session.send({"type": "auth_response", "request_id": request_id, "success": True,
+                            "role": role, "team": team})
+        logger.info("Client %s authorized as %s", websocket.remote_address, session)
+        return session
+
+    async def _dispatch(self, session: Session, raw: str) -> None:
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError
+        except ValueError:
+            await session.send({"type": "error", "success": False, "error": "Некорректный JSON"})
+            return
+
+        msg_type = data.get("type")
+        response: dict[str, Any]
+        entry = self.handlers.get(msg_type)
+        if entry is None:
+            response = {"success": False, "error": f"Неизвестный тип сообщения: {msg_type!r}"}
+        elif session.role not in entry[1]:
+            response = {"success": False, "error": "Недостаточно прав"}
+        else:
+            try:
+                response = await entry[0](session, data)
+            except RequestError as e:
+                response = {"success": False, "error": str(e)}
+            except Exception as e:
+                logger.exception("Ошибка обработки %s от %s", msg_type, session)
+                response = {"success": False, "error": f"Внутренняя ошибка сервера: {e}"}
+
+        if not response.get("success") and msg_type == "control":
+            response.setdefault("node_id", data.get("node_id"))
+            response.setdefault("action", data.get("action"))
+        response["type"] = f"{msg_type}_response"
+        if "request_id" in data:
+            response["request_id"] = data["request_id"]
+        await session.send(response)
+
+    async def handle_client(self, websocket) -> None:
+        logger.info("Client connected: %s", websocket.remote_address)
+        session = await self._authenticate(websocket)
+        if session is None:
+            return
+        self.sessions.add(session)
+        telemetry = asyncio.create_task(self._telemetry_loop(session))
+        try:
+            async for raw in websocket:
+                await self._dispatch(session, raw)
+        except ConnectionClosed:
+            pass
+        finally:
+            telemetry.cancel()
+            self.sessions.discard(session)
+            logger.info("Client disconnected: %s", session)
 
 
-def sync_real_to_simulator():
-    """
-    Обновляет симулятор реальными данными перед каждым tick.
-    Вызывается из основного цикла WebSocket.
-    """
-    if not simulator:
+# ================= ЗАПУСК =================
+
+async def main() -> None:
+    try:
+        server = DomeServer()
+    except (FileNotFoundError, ValueError) as e:
+        logger.error("Авторизация не настроена: %s", e)
+        logger.error("Создайте ключи: python authorization/generate_keys.py")
         return
 
-    for node_id in {config["node_id"] for config in REAL_TO_SIM_MAPPING.values()}:
-        if node_modes.get(node_id, "virtual") != "real":
-            continue
-        try:
-            updates = build_node_updates(node_id)
-            if updates:
-                updates["control_override_source"] = "real"
-                simulator.update(node_id, **updates)
-        except Exception as e:
-            logger.error(f"Failed to sync real devices -> {node_id}: {e}")
-
-
-def is_device_available(device_name: str) -> bool:
-    """Проверяет доступность реального устройства."""
-    if not REAL_HARDWARE_AVAILABLE:
-        return False
-    
-    if device_name == "inverter":
-        return inverter_monitor is not None
-    elif device_name == "battery":
-        return inverter_monitor is not None
-    elif device_name.startswith("L"):
-        return smart_manager is not None
-    elif device_name == "climate":
-        return smart_manager is not None
-    
-    return False
-
-
-# ================= УПРАВЛЕНИЕ РЕАЛЬНЫМ ЖЕЛЕЗОМ =================
-
-async def send_command_to_real_device(node_id: str, action: str, value: Any = None) -> bool:
-    """Отправляет команду на реальное устройство. Сейчас поддерживаются только
-    линии щитка: line_on / line_off / toggle_line с value = номер линии (1..8)."""
-    if not REAL_HARDWARE_AVAILABLE or not smart_manager:
-        return False
-    if node_id != PANEL_NODE_ID:
-        return False
-
-    line = value.get("line") if isinstance(value, dict) else value
+    await server.start()
     try:
-        device_name = f"L{int(line)}"
-    except (TypeError, ValueError):
-        logger.warning(f"Command {action} for {node_id}: invalid line {value!r}")
-        return False
-    if device_name not in REAL_TO_SIM_MAPPING:
-        return False
-
-    action = action.lower()
-    if action in ("line_on", "enable_line"):
-        new_state = True
-    elif action in ("line_off", "disable_line"):
-        new_state = False
-    elif action == "toggle_line":
-        new_state = not smart_manager.get_switch_state(device_name)
-    else:
-        logger.warning(f"Action {action} is not supported by real device {device_name}")
-        return False
-
-    # Отправляем команду на реле (блокирующий вызов в отдельном потоке)
-    return await asyncio.to_thread(smart_manager.set_switch, device_name, new_state)
-
-
-# ================= ОБРАБОТКА WEBSOCKET КОМАНД =================
-
-async def handle_control_command(data: dict) -> dict:
-    """Обрабатывает команду управления узлом."""
-    node_id = data.get("node_id")
-    action = data.get("action")
-    value = data.get("value")
-    job_name = data.get("job_name")
-    duration_s = data.get("duration_s")
-    
-    if not node_id or not action:
-        return {"success": False, "error": "Missing node_id or action"}
-    
-    mode = node_modes.get(node_id, "virtual")
-    
-    try:
-        if mode == "real":
-            # ВАРИАНТ A + синхронизация: команда на реальное железо + оптимистично в симулятор
-            success = await send_command_to_real_device(node_id, action, value)
-            
-            if success:
-                # Реальное состояние придёт со следующей синхронизацией; оптимистично
-                # отражаем команду в симуляторе, если узел её поддерживает
-                if action.lower() != "toggle_line":
-                    simulator.control(node_id, action, value, job_name=job_name, duration_s=duration_s)
-                return {"success": True, "node_id": node_id, "action": action, "mode": "real"}
-            else:
-                return {"success": False, "error": "Real device command failed"}
-        
-        elif mode == "virtual":
-            # Только в симулятор
-            simulator.control(node_id, action, value, job_name=job_name, duration_s=duration_s)
-            return {"success": True, "node_id": node_id, "action": action, "mode": "virtual"}
-        
-    except ControlError as e:  # недопустимое действие/значение — ошибка клиента, не сервера
-        logger.warning(f"Control command rejected for {node_id}: {e}")
-        return {"success": False, "error": str(e)}
-    except Exception as e:
-        logger.exception(f"Control command failed for {node_id}")
-        return {"success": False, "error": str(e)}
-    
-    return {"success": False, "error": "Unknown mode"}
-
-
-async def handle_switch_mode(data: dict) -> dict:
-    """Переключает режим узла между real и virtual."""
-    node_id = data.get("node_id")
-    new_mode = data.get("mode")  # "real" | "virtual"
-    
-    if not node_id or new_mode not in ("real", "virtual"):
-        return {"success": False, "error": "Invalid parameters"}
-    
-    try:
-        if new_mode == "virtual":
-            # Real → Virtual: убираем override флаг
-            simulator.set(node_id, "control_override_source", None)
-            node_modes[node_id] = "virtual"
-            logger.info(f"Switched {node_id} to VIRTUAL mode")
-            return {"success": True, "node_id": node_id, "mode": "virtual"}
-        
-        elif new_mode == "real":
-            # Virtual → Real: проверяем доступность и синхронизируем
-            devices = get_real_devices_for_node(node_id)
-            if not devices:
-                return {"success": False, "error": f"No real device mapped to {node_id}"}
-
-            unavailable = [d for d in devices if not is_device_available(d)]
-            if unavailable:
-                return {"success": False, "error": f"Real devices not available: {unavailable}"}
-
-            # Синхронизируем симулятор с реальностью
-            updates = build_node_updates(node_id)
-            if updates:
-                updates["control_override_source"] = "real"
-                simulator.update(node_id, **updates)
-            
-            node_modes[node_id] = "real"
-            logger.info(f"Switched {node_id} to REAL mode")
-            return {"success": True, "node_id": node_id, "mode": "real"}
-    
-    except Exception as e:
-        logger.exception(f"Mode switch failed for {node_id}")
-        return {"success": False, "error": str(e)}
-    
-    return {"success": False, "error": "Unknown error"}
-
-
-async def handle_trigger_crisis(data: dict) -> dict:
-    """Запускает кризисный сценарий."""
-    crisis_name = data.get("crisis_name")
-    params = data.get("params")
-    
-    if not crisis_name:
-        return {"success": False, "error": "Missing crisis_name"}
-    
-    try:
-        simulator.trigger_crisis(crisis_name, params)
-        logger.info(f"Triggered crisis: {crisis_name}")
-        return {"success": True, "crisis_name": crisis_name}
-    except Exception as e:
-        logger.exception(f"Failed to trigger crisis {crisis_name}")
-        return {"success": False, "error": str(e)}
-
-
-async def handle_stop_crisis(data: dict) -> dict:
-    """Останавливает кризисный сценарий."""
-    crisis_name = data.get("crisis_name")
-    
-    if not crisis_name:
-        return {"success": False, "error": "Missing crisis_name"}
-    
-    try:
-        simulator.stop_crisis(crisis_name)
-        logger.info(f"Stopped crisis: {crisis_name}")
-        return {"success": True, "crisis_name": crisis_name}
-    except Exception as e:
-        logger.exception(f"Failed to stop crisis {crisis_name}")
-        return {"success": False, "error": str(e)}
-
-
-async def handle_time_control(data: dict) -> dict:
-    """Управление временем симуляции."""
-    action = data.get("action")
-    value = data.get("value")
-    
-    try:
-        if action == "set_scale":
-            simulator.set_time_scale(float(value))
-        elif action == "pause":
-            simulator.pause()
-        elif action == "resume":
-            simulator.resume()
-        else:
-            return {"success": False, "error": f"Unknown action: {action}"}
-        
-        return {"success": True, "action": action}
-    except Exception as e:
-        logger.exception(f"Time control failed: {action}")
-        return {"success": False, "error": str(e)}
-
-
-# ================= ОБРАБОТКА КЛИЕНТОВ =================
-
-async def handle_client(websocket):
-    """Обрабатываем подключение клиента."""
-    try:
-        logger.info(f"Client connected: {websocket.remote_address}")
-        
-        # Отправляем текущее состояние сразу при подключении
-        snapshot = simulator.snapshot()
-        
-        # print("=== SNAPSHOT KEYS ===")
-        # print(snapshot.keys() if isinstance(snapshot, dict) else type(snapshot))
-        # print("=== SNAPSHOT ===")
-        # import pprint
-        # pprint.pprint(snapshot)
-        
-        telemetry_msg = {
-            "type": "telemetry",
-            "timestamp": snapshot["timestamp"],
-            "data": {
-                "nodes": snapshot["nodes"],
-                "active_crises": simulator.active_crises(),
-                "sim_time": simulator.time_controller.sim_time,
-                "time_scale": simulator.time_controller.time_scale,
-                "node_modes": node_modes,  # Добавляем информацию о режимах
-            }
-        }
-        await websocket.send(json.dumps(telemetry_msg))
-
-        while True:
-            # 1. Синхронизируем real данные с симулятором
-            sync_real_to_simulator()
-            
-            # 2. Получаем snapshot симулятора
-            snapshot = simulator.snapshot()
-            
-            # 3. Отправляем телеметрию
-            telemetry_msg = {
-                "type": "telemetry",
-                "timestamp": snapshot["timestamp"],
-                "data": {
-                    "nodes": snapshot["nodes"],
-                    "active_crises": simulator.active_crises(),
-                    "sim_time": simulator.time_controller.sim_time,
-                    "time_scale": simulator.time_controller.time_scale,
-                    "node_modes": node_modes,
-                }
-            }
-            await websocket.send(json.dumps(telemetry_msg))
-
-            # 4. Ждем команду от клиента (с таймаутом)
-            try:
-                message = await asyncio.wait_for(websocket.recv(), timeout=3.9)
-                data = json.loads(message)
-                msg_type = data.get("type")
-
-                response = None
-                if msg_type == "control":
-                    response = await handle_control_command(data)
-                elif msg_type == "switch_mode":
-                    response = await handle_switch_mode(data)
-                elif msg_type == "trigger_crisis":
-                    response = await handle_trigger_crisis(data)
-                elif msg_type == "stop_crisis":
-                    response = await handle_stop_crisis(data)
-                elif msg_type == "time_control":
-                    response = await handle_time_control(data)
-                elif msg_type == "describe_nodes":
-                    response = {"success": True, "nodes": simulator.describe_nodes()}
-                else:
-                    response = {"success": False, "error": f"Unknown message type: {msg_type}"}
-                
-                if response:
-                    response["type"] = f"{msg_type}_response"
-                    await websocket.send(json.dumps(response))
-
-            except asyncio.TimeoutError:
-                continue  # Просто идем на новый круг отправки телеметрии
-            except json.JSONDecodeError:
-                logger.warning("Invalid JSON received")
-            except Exception as e:
-                logger.error(f"Error processing message: {e}")
-
-    except Exception as e:
-        logger.info(f"Client disconnected: {e}")
-
-
-# ================= ЗАПУСК И ЖИЗНЕННЫЙ ЦИКЛ =================
-
-async def main():
-    """Запускаем сервер, симулятор и фоновые потоки опроса."""
-    global simulator, inverter_monitor, smart_manager
-    
-    # 1. Инициализация и запуск симулятора
-    logger.info("Initializing dome simulator...")
-    simulator = create_dome_simulator(tick_interval=4.0, time_scale=1.0)
-    simulator.start()
-    logger.info("Dome simulator started")
-    
-    # 2. Инициализация режимов узлов
-    init_default_modes()
-    logger.info(f"Node modes initialized: {len(node_modes)} real nodes")
-    
-    # 3. Инициализация и запуск монитора инвертора (если доступен)
-    if REAL_HARDWARE_AVAILABLE:
-        try:
-            inverter_monitor = InverterMonitor(poll_interval=2.0)
-            inverter_monitor.start()
-            logger.info("InverterMonitor started")
-        except Exception as e:
-            logger.error(f"Failed to start InverterMonitor: {e}")
-        
-        # 4. Инициализация и запуск менеджера умных устройств (если доступен)
-        try:
-            smart_manager = SmartDeviceManager(
-                switch_configs=SWITCH_CONFIGS,
-                sensor_config=CO2_SENSOR,
-                poll_interval=4.0
-            )
-            smart_manager.start()
-            logger.info("SmartDeviceManager started")
-        except Exception as e:
-            logger.error(f"Failed to start SmartDeviceManager: {e}")
-    else:
-        logger.warning("Real hardware not available - running in simulation-only mode")
-    
-    # 5. Запуск WebSocket сервера
-    try:
-        async with serve(handle_client, "0.0.0.0", 8765):
-            logger.info("WebSocket server started on ws://0.0.0.0:8765")
-            logger.info("Press Ctrl+C to stop the server gracefully.")
-            
-            await asyncio.Future()  # Бесконечное ожидание
-            
-    except KeyboardInterrupt:
-        logger.info("Shutdown signal received (Ctrl+C)...")
+        async with serve(server.handle_client, HOST, PORT, max_size=2_000_000):
+            logger.info("WebSocket server started on ws://%s:%d (active team: %d)", HOST, PORT, ACTIVE_TEAM)
+            await asyncio.Future()
     except asyncio.CancelledError:
         logger.info("Server task cancelled.")
     finally:
-        # 6. Корректная остановка всех компонентов
-        logger.info("Stopping all components...")
-        
-        if simulator:
-            simulator.stop()
-            logger.info("Simulator stopped")
-        
-        if inverter_monitor:
-            inverter_monitor.stop()
-            logger.info("InverterMonitor stopped")
-        
-        if smart_manager:
-            smart_manager.stop()
-            logger.info("SmartDeviceManager stopped")
-        
-        logger.info("Server stopped gracefully")
+        await server.stop()
 
 
 if __name__ == "__main__":

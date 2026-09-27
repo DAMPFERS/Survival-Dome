@@ -4,6 +4,7 @@
 """
 
 import hashlib
+import hmac
 import json
 import os
 from typing import Optional
@@ -107,6 +108,25 @@ class Protector:
     def getActiveTeamIndex(self) -> Optional[int]:
         """Возвращает индекс активной команды или None если не установлен."""
         return self._activeTeamIndex
+
+    def getRole(self, inputKey: str) -> Optional[str]:
+        """
+        Определяет роль владельца ключа (без вывода в консоль).
+
+        Returns:
+            "admin"  — админский ключ;
+            "team"   — ключ АКТИВНОЙ команды;
+            None     — ключ неверный или принадлежит неактивной команде.
+        """
+        if not isinstance(inputKey, str) or not inputKey:
+            return None
+        inputHash = self._hashKey(inputKey)
+        if hmac.compare_digest(inputHash, self.adminHash):
+            return "admin"
+        if self._activeTeamIndex is not None and hmac.compare_digest(
+                inputHash, self.teamHashes[self._activeTeamIndex]):
+            return "team"
+        return None
 
 
 # Пример использования

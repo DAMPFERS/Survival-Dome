@@ -46,15 +46,17 @@ async function getTelemetry() {
 }
 
 // ---- отрисовка ----
-const STATUS = { printing: 'Печатает', milling: 'Фрезерует', paused: 'Пауза', idle: 'Простой' };
+const STATUS = { printing: 'Печатает', milling: 'Фрезерует', paused: 'Пауза', idle: 'Простой', error: 'Авария' };
 function machine(id, d) {
   const a = d.status === 'printing' || d.status === 'milling';
+  if (d.status === 'error') { $(id).innerHTML = `<span class="badge pause">${STATUS.error}</span>`; return; }
   const h = d.status === 'idle' ? '' : `<div class="bar"><div style="width:${d.progress}%"></div></div>
     <div class="kv"><span>Готово <b>${Math.round(d.progress)}%</b></span><span>Осталось <b>${Math.floor(d.remainMin / 60)} ч ${d.remainMin % 60} мин</b></span></div>`;
   $(id).innerHTML = `<span class="badge ${a ? 'on' : d.status === 'paused' ? 'pause' : ''}">${STATUS[d.status]}</span>${h}`;
 }
-function bars(id, arr, unit) {
-  const max = Math.max(...arr, 1), now = new Date().getHours();
+function bars(id, arr, unit, startHour) {
+  // startHour — первый час прогноза по времени купола (от сервера); в демо — по часам браузера
+  const max = Math.max(...arr, 1), now = startHour ?? new Date().getHours();
   $(id).innerHTML = arr.map((v, i) => `<div title="${v} ${unit}"><i style="height:${v / max * 80}%"></i>${(now + i) % 24}ч</div>`).join('');
 }
 function spark(vals) {
@@ -84,7 +86,7 @@ function render(t) {
   const wOn = t.windKw > 0.05;
   $('windgen').innerHTML = `<span class="badge ${wOn ? 'on' : ''}">${wOn ? 'Вырабатывает' : 'Штиль'}</span>
     <div class="kv"><span>Мощность <b>${t.windKw.toFixed(2)} кВт</b></span></div>`;
-  bars('fSun', t.fSun, '%'); bars('fWind', t.fWind, 'м/с');
+  bars('fSun', t.fSun, '%', t.forecastStartHour); bars('fWind', t.fWind, 'м/с', t.forecastStartHour);
   $('upd').textContent = 'обновлено ' + new Date().toLocaleTimeString('ru-RU');
 }
 async function tick() {

@@ -178,6 +178,14 @@ class Simulator:
             })
         return catalog
 
+    def resolve_action(self, node_id: str, action: str) -> Optional[str]:
+        """Основное имя управляющего воздействия узла (алиасы и регистр нормализуются).
+        None — узел такого действия не поддерживает."""
+        node = self.registry.get(node_id)
+        if not isinstance(node, SandboxNode):
+            return None
+        return node.canonical_control(action)
+
     def control(self, node_id: str, action: str, value: Any = None,
                 job_name: Optional[str] = None, duration_s: Optional[float] = None) -> None:
         """

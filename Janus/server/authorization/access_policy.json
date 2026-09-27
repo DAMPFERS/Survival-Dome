@@ -1,0 +1,42 @@
+{
+  "_comment": "Права участника (роль team). Админ видит и может всё. Файл перечитывается автоматически. actions — основные имена действий (алиасы разрешаются сервером), \"*\" — все действия узла; visible:false — узел скрыт; hidden_params — glob-шаблоны скрытых параметров.",
+  "participant": {
+    "telemetry_fields": ["game_time"],
+    "hidden_params": ["control_*", "control_override_source"],
+    "default": {"visible": true, "actions": []},
+    "nodes": {
+      "solar_panels_01": {"actions": ["enable_mppt_1", "disable_mppt_1", "enable_all_mppt", "disable_all_mppt", "enable_mppt", "disable_mppt"]},
+      "solar_inverter_01": {"actions": ["start_cell_balancing", "cancel_balancing", "set_mode_hybrid", "set_mode_grid_only", "enable_mppt", "disable_mppt", "reset_error", "set_fan"]},
+      "battery_01": {"actions": []},
+      "wind_turbine_01": {"actions": ["turn_on", "turn_off"]},
+      "dizel_1": {"actions": ["turn_on", "turn_off"]},
+      "fuel_tank_01": {"actions": []},
+      "smart_panel_01": {"actions": ["line_on", "line_off", "reset_line_error", "reset_protection"]},
+      "printer_3d_01": {"actions": ["pause", "resume", "abort", "home", "send_gcode"]},
+      "cnc_01": {"actions": ["feed_hold", "resume", "abort", "home", "reset_alarm", "send_gcode"]},
+      "climate_sensor_01": {"actions": []},
+      "air_quality_sensor_01": {"actions": []},
+      "smoke_detector_01": {"actions": ["reset_alarm"]},
+      "fume_extraction_01": {"actions": ["turn_on", "turn_off", "reset_alarm"]},
+      "weather_station_01": {"actions": []},
+      "seysmo_01": {"actions": ["set_threshold"]},
+      "water_pump_01": {"actions": ["turn_on", "turn_off", "reset_alarm", "set_power_limit"]},
+      "water_tank_01": {"actions": []},
+      "water_filter_01": {"actions": ["switch_to_reserve", "force_flush", "reset_warning"]},
+      "fire_suppression_01": {"actions": ["manual_start_zone", "stop", "reset_alarm", "block_automation", "unblock_automation"]},
+      "access_control_01": {"actions": ["unlock_door", "lock_door", "reset_alarm", "lockdown"]},
+      "radiation_sensor_01": {"actions": ["reset_alarm", "set_thresholds"]},
+      "chem_sensor_01": {"actions": ["reset_alarm", "set_thresholds"]},
+      "material_inventory_01": {"actions": []},
+      "equipment_cooling_01": {"actions": ["turn_on", "turn_off", "set_speed", "reset_alarm"]},
+      "supply_ventilation_01": {"actions": ["turn_on", "turn_off", "set_speed", "set_mode", "reset_alarm"]},
+      "dome_sealing_01": {"actions": ["open_valves", "close_valves", "seal_zone", "reset_error"]},
+      "climate_sensor_02": {"actions": []},
+      "climate_sensor_03": {"actions": []},
+      "radio_01": {"actions": ["set_frequency", "set_protocol"]},
+      "backup_comms_01": {"actions": ["switch_channel", "set_traffic_priority", "set_protocol"]},
+      "edge_compute_01": {"actions": ["restart_service", "limit_load", "reboot"]},
+      "thermal_insulation_01": {"actions": ["set_fan_pwm"], "hidden_params": ["random_rpm_mode", "pwm_distortion"]}
+    }
+  }
+}

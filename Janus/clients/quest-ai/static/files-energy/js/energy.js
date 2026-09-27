@@ -94,6 +94,7 @@ function buildButtons() {
     b.innerHTML = '<span class="lb-top"><span class="lb-dot"></span><span class="lb-name"></span><span class="lb-badge"></span></span><span class="lb-kw"></span>';
     b.querySelector('.lb-name').textContent = CONFIG.lineNames[i];
     b.addEventListener('click', () => {
+      if (!CONFIG.useMock) { toggleLineLive(i); return; }
       l.on = !l.on;
       if (!l.on) l.kw = 0;
       updateButton(i); updateChips();
@@ -106,7 +107,9 @@ function updateButton(i) {
   const l = state.lines[i], b = btnEls[i];
   b.classList.toggle('is-on', l.on);
   b.classList.toggle('is-off', !l.on);
-  b.querySelector('.lb-badge').textContent = l.on ? 'ВКЛ' : 'ВЫКЛ';
+  const tripped = l.status === 'TRIPPED' || l.status === 'RCD_TRIP';
+  b.querySelector('.lb-badge').textContent = l.on ? 'ВКЛ' : tripped ? 'АВАРИЯ' : 'ВЫКЛ';
+  b.querySelector('.lb-name').textContent = CONFIG.lineNames[i];
   b.querySelector('.lb-kw').innerHTML = (l.on ? l.kw.toFixed(2) : '—') + ' <small>кВт</small>';
 }
 
@@ -329,12 +332,62 @@ function render() {
   renderSolarChart();
 }
 
+// ---------------- живой режим: данные купола через quest-ai ----------------
+async function tickLive() {
+  try {
+    const r = await fetch(CONFIG.telemetryUrl);
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    state.simMin = d.t;
+    d.per.forEach((kw, i) => {
+      const l = state.lines[i];
+      if (!l) return;
+      l.kw = kw; l.on = d.on[i]; l.status = d.states[i];
+      if (d.names && d.names[i]) CONFIG.lineNames[i] = (i + 1) + '. ' + d.names[i];
+    });
+    const last = state.history[state.history.length - 1];
+    if (!last || d.t > last.t) state.history.push({ t: d.t, gen: d.gen, cons: d.cons, per: d.per.slice() });
+    const cutoff = state.simMin - CONFIG.historyWindowMin;
+    while (state.history.length > 1 && state.history[0].t < cutoff) state.history.shift();
+    state.forecast = d.forecast;
+    render();
+    $('upd').textContent = 'время купола ' + fmtHM(state.simMin);
+  } catch (e) {
+    $('upd').textContent = 'нет связи с куполом';
+  }
+}
+
+async function toggleLineLive(i) {
+  const l = state.lines[i], b = btnEls[i];
+  b.disabled = true;
+  try {
+    const r = await fetch(CONFIG.lineUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ line: i + 1, on: !l.on })
+    });
+    const res = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(res.detail || r.status);
+    l.on = !l.on;
+    updateButton(i); updateChips();
+  } catch (e) {
+    $('upd').textContent = CONFIG.lineNames[i] + ': ' + e.message;
+  } finally {
+    b.disabled = false;
+  }
+}
+
 buildButtons(); buildChips(); buildLegend();
-state.history.push(sampleNow());
-state.simMin += CONFIG.simSpeedMinPerTick;
-state.history.push(sampleNow());
-computeForecast();
 initHover();
-render();
-$('upd').textContent = 'время купола ' + fmtHM(state.simMin);
-setInterval(tick, CONFIG.refreshMs);
+if (CONFIG.useMock) {
+  state.history.push(sampleNow());
+  state.simMin += CONFIG.simSpeedMinPerTick;
+  state.history.push(sampleNow());
+  computeForecast();
+  render();
+  $('upd').textContent = 'время купола ' + fmtHM(state.simMin);
+  setInterval(tick, CONFIG.refreshMs);
+} else {
+  tickLive();
+  setInterval(tickLive, CONFIG.refreshMs);
+}

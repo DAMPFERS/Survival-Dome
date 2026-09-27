@@ -39,6 +39,9 @@ class Settings:
     DOME_SERVER_URL: str = os.getenv("DOME_SERVER_URL", "ws://localhost:8765")
     DOME_RECONNECT_DELAY: int = int(os.getenv("DOME_RECONNECT_DELAY", "5"))
     DOME_ENABLE_CONTROL: bool = os.getenv("DOME_ENABLE_CONTROL", "true").lower() == "true"
+    # Ключ доступа к серверу купола (admin — полный доступ; действия Хранителя
+    # дополнительно ограничены списком KEEPER_ALLOWED_ACTIONS в app/tools.py)
+    DOME_ACCESS_KEY: str = os.getenv("DOME_ACCESS_KEY", "")
 
 
 settings = Settings()

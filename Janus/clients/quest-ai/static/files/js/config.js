@@ -1,6 +1,6 @@
 // Настройки. Для подключения реального бекенда поставьте useMock:false и укажите адреса.
 const CONFIG = {
-  useMock: true,                    // true = демо-данные без сервера
+  useMock: false,                   // true = демо-данные без сервера
   telemetryUrl: '/api/telemetry',   // GET -> JSON (формат см. mockTelemetry() в telemetry.js)
   chatUrl: '/api/chat',             // POST {message} -> {reply}
   refreshMs: 2000,                  // период обновления телеметрии

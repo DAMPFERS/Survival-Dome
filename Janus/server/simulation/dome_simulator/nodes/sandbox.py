@@ -136,6 +136,15 @@ class SandboxNode(BaseNode):
         return sorted(cls._control_aliases)
 
     @classmethod
+    def canonical_control(cls, action: str) -> Optional[str]:
+        """Основное имя действия по любому его имени/алиасу; None — действие не поддерживается."""
+        method = cls._controls.get(action.strip().lower())
+        if method is None:
+            return None
+        return next(name for name, _ in cls._control_aliases.items()
+                    if cls._controls[name] == method)
+
+    @classmethod
     def control_aliases(cls) -> dict[str, list[str]]:
         return {name: list(aliases) for name, aliases in sorted(cls._control_aliases.items())}
 
