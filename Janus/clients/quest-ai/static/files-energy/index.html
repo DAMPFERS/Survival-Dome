@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>МКИ 2026 — Панель энергетика</title>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<header class="top">
+  <img class="logo" src="assets/logo_1.png" alt="Логотип 1">
+  <div class="title">
+    <h1>Панель энергетика</h1>
+    <p>МКИ: Энергетическая система купола</p>
+  </div>
+  <div class="live"><i></i><span id="upd">подключение…</span></div>
+  <img class="logo" src="assets/logo_2.png" alt="Логотип 2">
+</header>
+
+<main class="layout">
+  <section class="lines-panel" aria-label="Энергетические линии">
+    <h2>Линии энергоснабжения</h2>
+    <div id="lineButtons" class="line-buttons"></div>
+  </section>
+
+  <section class="charts-panel">
+    <article class="card chart-card" aria-label="Прогноз солнечной активности">
+      <div class="card-head">
+        <h2>Прогноз солнечной активности</h2>
+        <span class="hint" id="solarHint">кВт · среднее и разброс (σ)</span>
+      </div>
+      <div class="chart-wrap" id="solarWrap">
+        <svg id="solarChart" class="chart" viewBox="0 0 640 220" preserveAspectRatio="none"></svg>
+        <div id="solarTip" class="tip" hidden></div>
+      </div>
+      <details class="tbl">
+        <summary>Таблица прогноза</summary>
+        <div class="tbl-scroll"><table id="solarTable"></table></div>
+      </details>
+    </article>
+
+    <article class="card chart-card" aria-label="Потребление и генерация">
+      <div class="card-head">
+        <h2>Потребление и генерация</h2>
+        <div class="legend" id="mainLegend"></div>
+      </div>
+      <div class="line-toggles" id="lineToggles" aria-label="Показать линию на графике"></div>
+      <div class="chart-wrap" id="powerWrap">
+        <svg id="powerChart" class="chart" viewBox="0 0 640 220" preserveAspectRatio="none"></svg>
+        <div id="powerTip" class="tip" hidden></div>
+      </div>
+      <details class="tbl">
+        <summary>Таблица данных</summary>
+        <div class="tbl-scroll"><table id="powerTable"></table></div>
+      </details>
+    </article>
+  </section>
+</main>
+<script src="js/config.js"></script>
+<script src="js/energy.js"></script>
+</body>
+</html>

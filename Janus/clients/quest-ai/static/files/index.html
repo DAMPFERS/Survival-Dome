@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>МКИ 2026 — Мониторинг купола</title>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<header class="top">
+  <!-- ЛОГОТИП 1: замените этот div на:
+       <img class="logo" src="assets/logo_1.png" alt="Логотип 1"> -->
+  <img class="logo" src="assets/logo_1.png" alt="Логотип 1">
+       <!-- <div class="logo-slot"></div> -->
+  <div class="title">
+    <h1>Мониторинг купола</h1>
+    <p>МКИ: Лига автономных систем</p>
+  </div>
+  <div class="live"><i></i><span id="upd">подключение…</span></div>
+  <!-- ЛОГОТИП 2: замените этот div на:
+       <img class="logo" src="assets/logo_2.png" alt="Логотип 2"> -->
+  <img class="logo" src="assets/logo_2.png" alt="Логотип 2">
+       <!-- <div class="logo-slot"></div> -->
+</header>
+
+<main class="layout">
+  <section class="dash" aria-label="Телеметрия купола">
+    <div class="grid">
+      <article class="card">
+        <h2>Энергобаланс</h2>
+        <div class="big"><b id="solar">—</b><span>кВт · солнечные панели</span></div>
+        <svg id="solarSpark" class="spark" viewBox="0 0 200 50" preserveAspectRatio="none"></svg>
+        <div class="row2"><div>Потребление <b id="cons">—</b></div><div>Баланс <b id="bal">—</b></div></div>
+      </article>
+
+      <article class="card">
+        <h2>Потребление по линиям</h2>
+        <div id="lines" class="lines"></div>
+      </article>
+
+      <article class="card wide">
+        <h2>Микроклимат</h2>
+        <div class="tiles">
+          <div class="tile"><span>Температура</span><b id="temp">—</b></div>
+          <div class="tile"><span>Влажность</span><b id="hum">—</b></div>
+          <div class="tile"><span>Уровень CO₂</span><b id="co2">—</b></div>
+        </div>
+      </article>
+
+      <article class="card"><h2>3D-принтер</h2><div id="printer"></div></article>
+      <article class="card"><h2>ЧПУ-фрезер (платы)</h2><div id="cnc"></div></article>
+      <article class="card"><h2>Дизель-генератор</h2><div id="diesel"></div></article>
+      <article class="card"><h2>Ветрогенератор</h2><div id="windgen"></div></article>
+
+      <article class="card">
+        <h2>Прогноз солнца, %</h2>
+        <div id="fSun" class="bars"></div>
+      </article>
+      <article class="card">
+        <h2>Прогноз ветра, м/с</h2>
+        <div id="fWind" class="bars blue"></div>
+      </article>
+    </div>
+  </section>
+
+  <aside class="chat" aria-label="ИИ-помощник">
+    <div class="chat-head"><b>ИИ-помощник купола</b><span>онлайн</span></div>
+    <div id="msgs" class="msgs" aria-live="polite"></div>
+    <div class="chat-form">
+      <textarea id="input" rows="2" placeholder="Спросите о состоянии купола…"></textarea>
+      <button id="send" type="button">Отправить</button>
+    </div>
+  </aside>
+</main>
+<script src="js/config.js"></script>
+<script src="js/telemetry.js"></script>
+<script src="js/chat.js"></script>
+</body>
+</html>
