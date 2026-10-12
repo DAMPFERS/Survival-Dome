@@ -14,14 +14,18 @@
 одного устройства не отключает остальные.
 
 Статус: адаптеры принтера и ЧПУ написаны по коду модулей 3d-print/ и frezer/
-и ещё не проверены на реальном оборудовании.
+и ещё не проверены на реальном оборудовании. Адаптер ЧПУ проверен на эмуляторе
+GRBL с cnc_controller.py (GRBL 1.1, протокол send-response).
 """
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -388,74 +392,195 @@ class PrinterAdapter(RealDeviceAdapter):
 # ЧПУ-фрезер (GRBL через ESP32 TCP bridge)
 # ---------------------------------------------------------------------------
 
+# Состояние GRBL (machine_state без подсостояния: "Hold:0" -> "Hold") -> state узла.
+# Ключ (milling, machine_state); milling=None — подходит для любого значения.
+# Имена состояний узла пока не сверены с симулятором — при необходимости поправить здесь.
+CNC_STATE_MAP: dict[tuple[Optional[bool], str], str] = {
+    (None, "Alarm"): "ALARM",
+    (None, "Door"): "ERROR",
+    (None, "Home"): "HOMING",
+    (True, "Run"): "RUNNING",
+    (True, "Hold"): "PAUSED",
+    (True, "Idle"): "RUNNING",      # между строками задания / ещё не началось движение
+    (False, "Idle"): "IDLE",
+    (False, "Run"): "BUSY",         # пробинг, отъезд, ручная команда
+    (False, "Jog"): "BUSY",
+    (False, "Hold"): "PAUSED",
+    (None, "Check"): "IDLE",
+    (None, "Sleep"): "IDLE",
+}
+
+# Параметры probe_z, которые можно передать в value, и допустимые диапазоны
+CNC_PROBE_LIMITS: dict[str, tuple[float, float]] = {
+    "distance": (0.1, 30.0),          # мм вниз от текущей точки
+    "feed": (1.0, 300.0),             # мм/мин
+    "plate_thickness": (0.0, 30.0),   # мм
+    "retract": (0.0, 20.0),           # мм
+    "second_pass_feed": (1.0, 100.0), # мм/мин
+    "latch_distance": (0.1, 5.0),     # мм
+}
+
+# $-команды, разрешённые в send_gcode (только чтение). Homing и снятие Alarm —
+# отдельными действиями home / reset_alarm; запись настроек ($N=..., $RST) запрещена.
+CNC_SAFE_DOLLAR = {"$G", "$#", "$I"}
+
+
 class CNCAdapter(RealDeviceAdapter):
     """
-    start_job: value = имя файла (или {"file_name": ...}) внутри каталога
-    gcode_dir — произвольные пути с сервера запрещены.
-    Контроллер не умеет abort / reset_alarm / произвольный G-code — такие
-    команды отклоняются. Дополнительно: probe_z (поиск нуля Z пробником).
+    Действия (имена основных действий узла):
+        start_job    value = имя файла (или {"file_name": ...}) из каталога gcode_dir —
+                     произвольные пути с сервера запрещены;
+        feed_hold    пауза задания (идемпотентно: без задания ничего не делает);
+        resume       продолжение задания (идемпотентно);
+        abort        прервать задание (feed hold -> остановка -> soft reset, позиция сохраняется);
+        home         $H;
+        reset_alarm  $X — снять Alarm без homing (позиция может быть неверной);
+        send_gcode   одна строка G-code (из $-команд — только чтение: $G, $#, $I);
+        probe_z      поиск нуля Z пробником; value — необязательный dict с параметрами
+                     из CNC_PROBE_LIMITS.
+
+    home / reset_alarm / probe_z / send_gcode выполняются в worker-потоке контроллера
+    дольше таймаута команды сервера. Поэтому execute() ждёт результат COMMAND_GRACE_S:
+    мгновенные ошибки (error:N, Alarm, занятость) уходят клиенту, а если команда ещё идёт —
+    она считается принятой, итог виден в телеметрии (state / error_text).
+
+    Подключение к ESP32 — в фоновом потоке, чтобы не блокировать цикл синхронизации:
+    без связи CNCController.start() ждёт до connect_timeout + 2 с. После первого
+    подключения обрывы контроллер обрабатывает сам.
     """
     node_id = "cnc_01"
     title = "ЧПУ-фрезер 3018 Pro (GRBL)"
     RETRY_S = 30.0
+    COMMAND_GRACE_S = 2.0
+    GCODE_GRACE_S = 5.0
 
     def __init__(self, host: str, port: int = 8881, gcode_dir: Optional[Path] = None) -> None:
         self.host, self.port = host, port
         self.gcode_dir = (gcode_dir or SERVER_DIR / "frezer" / "gcode").resolve()
         self._module = _import_optional("cnc_controller", SERVER_DIR / "frezer")
         self.cnc = None
+        self._lock = threading.Lock()
+        self._connecting = False
+        self._stopped = False
         self._last_attempt = float("-inf")
+        self._pending = None            # Future последней фоновой команды
+        self._pending_action: Optional[str] = None
+        self._acked_error: Optional[str] = None   # ошибка контроллера, «погашенная» успешной командой
+
+    # ---------------- жизненный цикл ----------------
 
     def start(self) -> None:
+        with self._lock:
+            self._stopped = False
         self.ensure_started()
 
     def ensure_started(self) -> None:
-        """Контроллер падает на старте без связи — повторяем попытку раз в RETRY_S."""
-        import time
-        if self._module is None or (self.cnc is not None and self.cnc.is_running()):
-            return
-        if time.monotonic() - self._last_attempt < self.RETRY_S:
-            return
-        self._last_attempt = time.monotonic()
-        cnc = self._module.CNCController(ip=self.host, port=self.port)
+        """Запускает попытку подключения в фоне не чаще раза в RETRY_S. Не блокирует."""
+        with self._lock:
+            if self._module is None or self._stopped or self._connecting:
+                return
+            if self.cnc is not None and self.cnc.is_running():
+                return
+            if time.monotonic() - self._last_attempt < self.RETRY_S:
+                return
+            self._last_attempt = time.monotonic()
+            self._connecting = True
+        threading.Thread(target=self._connect, name="CNC-connect", daemon=True).start()
+
+    def _connect(self) -> None:
         try:
-            cnc.start()
-        except Exception as e:
-            logger.warning("ЧПУ %s:%d недоступен: %s", self.host, self.port, e)
-            return
-        self.cnc = cnc
-        logger.info("CNCController %s:%d запущен", self.host, self.port)
+            old = self.cnc
+            if old is not None:          # потоки контроллера умерли — пересоздаём
+                try:
+                    old.stop()
+                except Exception:
+                    pass
+            cnc = self._module.CNCController(ip=self.host, port=self.port)
+            try:
+                cnc.start()
+            except Exception as e:
+                logger.warning("ЧПУ %s:%d недоступен: %s", self.host, self.port, e)
+                with self._lock:
+                    if self.cnc is old:
+                        self.cnc = None
+                return
+            with self._lock:
+                stopped = self._stopped
+                if not stopped:
+                    self.cnc = cnc
+            if stopped:                  # stop() вызвали, пока подключались
+                cnc.stop()
+                return
+            logger.info("CNCController %s:%d запущен", self.host, self.port)
+        finally:
+            with self._lock:
+                self._connecting = False
 
     def stop(self) -> None:
-        if self.cnc is not None:
-            self.cnc.stop()
-            self.cnc = None
+        with self._lock:
+            self._stopped = True
+            cnc, self.cnc = self.cnc, None
+        if cnc is not None:
+            cnc.stop()   # при идущей фрезеровке — безопасная остановка (может занять до ~40 с)
+
+    # ---------------- состояние ----------------
+
+    @staticmethod
+    def _grbl_responds(s) -> bool:
+        # online у контроллера = есть TCP до ESP32; GRBL ответил, если состояние известно
+        return s.online and s.machine_state != "Unknown"
 
     def available(self) -> bool:
-        return self.cnc is not None and self.cnc.get_state().online
+        cnc = self.cnc
+        return cnc is not None and self._grbl_responds(cnc.get_state())
+
+    def _busy(self) -> bool:
+        return self._pending is not None and not self._pending.done()
+
+    def _node_state(self, s) -> tuple[str, Optional[str]]:
+        base = s.machine_state.split(":", 1)[0]
+        if s.milling and s.paused:
+            state = "PAUSED"
+        else:
+            state = (CNC_STATE_MAP.get((s.milling, base))
+                     or CNC_STATE_MAP.get((None, base))
+                     or ("RUNNING" if s.milling else "IDLE"))
+        if state == "IDLE" and self._busy():
+            state = "HOMING" if self._pending_action == "home" else "BUSY"
+        error_code = None
+        if base == "Alarm":
+            error_code = f"ALARM_{s.alarm}" if s.alarm else "ALARM"
+        elif base == "Door":
+            error_code = "SAFETY_DOOR"
+        return state, error_code
 
     def read(self) -> Optional[dict[str, Any]]:
         self.ensure_started()
-        if self.cnc is None:
+        cnc = self.cnc
+        if cnc is None:
             return None
-        s = self.cnc.get_state()
-        if not s.online:
-            return {"online": False}
-        if s.milling:
-            state = "PAUSED" if s.paused else "RUNNING"
-        else:
-            state = "IDLE"
+        s = cnc.get_state()
+        if not self._grbl_responds(s):
+            return {"online": False, "error_text": s.error}
+        state, error_code = self._node_state(s)
+        error = s.error if s.error != self._acked_error else None
         return {
             "online": True,
             "state": state,
             "paused": s.paused,
-            "x_mm": round(s.x, 3), "y_mm": round(s.y, 3), "z_mm": round(s.z, 3),
-            "spindle_rpm": s.spindle_rpm if s.spindle_on else 0.0,
+            # WPos неизвестны, пока GRBL не прислал WCO (1–3 с после подключения)
+            "x_mm": round(s.x, 3) if s.x is not None else None,
+            "y_mm": round(s.y, 3) if s.y is not None else None,
+            "z_mm": round(s.z, 3) if s.z is not None else None,
+            "spindle_rpm": s.spindle_rpm,   # из отчёта FS; spindle_on обновляется только по $G
             "file_name": Path(s.current_file).name if s.current_file else None,
             "progress_pct": round(s.progress, 1),
-            "error_code": None,
-            "error_text": s.error,
+            "error_code": error_code,
+            "error_text": error,
+            "real_state": s.machine_state,  # сырое состояние GRBL (Idle, Run, Hold:0, Alarm, ...)
         }
+
+    # ---------------- команды ----------------
 
     def _job_path(self, value: Any) -> Path:
         name = value.get("file_name") if isinstance(value, dict) else value
@@ -468,30 +593,115 @@ class CNCAdapter(RealDeviceAdapter):
             raise RealCommandError(f"start_job: файл {name!r} не найден в {self.gcode_dir}")
         return path
 
+    @staticmethod
+    def _probe_params(value: Any) -> dict[str, float]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise RealCommandError("probe_z: value — объект с параметрами "
+                                   f"{', '.join(CNC_PROBE_LIMITS)} (все необязательны)")
+        unknown = set(value) - set(CNC_PROBE_LIMITS)
+        if unknown:
+            raise RealCommandError(f"probe_z: неизвестные параметры {sorted(unknown)}. "
+                                   f"Доступно: {', '.join(CNC_PROBE_LIMITS)}")
+        params: dict[str, float] = {}
+        for key, raw in value.items():
+            if raw is None:
+                continue
+            lo, hi = CNC_PROBE_LIMITS[key]
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                raise RealCommandError(f"probe_z: {key} — ожидалось число, получено {raw!r}") from None
+            if not lo <= v <= hi:
+                raise RealCommandError(f"probe_z: {key} должен быть в диапазоне {lo:g}..{hi:g}")
+            params[key] = v
+        return params
+
+    @staticmethod
+    def _gcode_line(value: Any) -> str:
+        line = value.get("gcode") if isinstance(value, dict) else value
+        if not isinstance(line, str) or not line.strip():
+            raise RealCommandError("send_gcode: ожидалась непустая строка G-code")
+        line = line.strip()
+        if "\n" in line or "\r" in line:
+            raise RealCommandError("send_gcode: допускается ровно одна строка")
+        if line.startswith("$") and line.upper() not in CNC_SAFE_DOLLAR:
+            raise RealCommandError(f"send_gcode: из $-команд разрешены только {sorted(CNC_SAFE_DOLLAR)}; "
+                                   "для $H / $X — действия home / reset_alarm")
+        return line
+
+    def _on_done(self, fut) -> None:
+        """Итог фоновой команды (вызывается в потоке контроллера)."""
+        if fut.cancelled():
+            return
+        cnc = self.cnc
+        if fut.exception() is None:
+            # успешная команда «гасит» старую ошибку в телеметрии
+            self._acked_error = cnc.get_state().error if cnc is not None else None
+        else:
+            self._acked_error = None
+
+    def _submit(self, action: str, factory, grace: float) -> None:
+        """Ставит команду контроллера в очередь и ждёт до grace секунд (в потоке)."""
+        if self._busy():
+            raise RealCommandError(f"Фрезер выполняет {self._pending_action} — дождитесь завершения")
+        fut = factory()
+        self._pending, self._pending_action = fut, action
+        fut.add_done_callback(self._on_done)
+        try:
+            fut.result(timeout=grace)
+        except concurrent.futures.TimeoutError:
+            logger.info("Фрезер: %s принята, выполняется", action)
+
+    def _execute_sync(self, c, action: str, value: Any) -> None:
+        if action == "feed_hold":
+            c.pause()
+        elif action == "resume":
+            c.resume()
+        elif action == "abort":
+            if not c.get_state().milling:
+                raise RealCommandError("Нет выполняемого задания")
+            c.abort_milling()
+        elif action == "start_job":
+            path = self._job_path(value)
+            if self._busy():
+                raise RealCommandError(f"Фрезер выполняет {self._pending_action} — дождитесь завершения")
+            # Alarm проверяет сам контроллер; Run/Jog (хвост предыдущего движения) не мешают —
+            # GRBL поставит строки задания в очередь после него
+            st = c.get_state()
+            if not st.milling and st.machine_state.split(":", 1)[0] in ("Home", "Hold", "Door", "Sleep"):
+                raise RealCommandError(f"Станок не готов к заданию: {st.machine_state}")
+            c.start_milling(path)
+        elif action == "home":
+            self._submit(action, c.home, self.COMMAND_GRACE_S)
+            return
+        elif action == "reset_alarm":
+            self._submit(action, c.unlock, self.COMMAND_GRACE_S)
+            return
+        elif action == "probe_z":
+            params = self._probe_params(value)
+            self._submit(action, lambda: c.probe_z_zero(**params), self.COMMAND_GRACE_S)
+            return
+        elif action == "send_gcode":
+            line = self._gcode_line(value)
+            self._submit(action, lambda: c.send_command(line), self.GCODE_GRACE_S)
+            return
+        else:
+            raise RealCommandError(f"Реальный фрезер не поддерживает {action!r} (доступно: feed_hold, "
+                                   "resume, abort, home, reset_alarm, start_job, send_gcode, probe_z)")
+        self._acked_error = c.get_state().error
+
     async def execute(self, action: str, value: Any = None) -> None:
         c = self.cnc
-        if c is None:
+        if c is None or not self._grbl_responds(c.get_state()):
             raise RealCommandError("Фрезер не подключен")
-        if action == "feed_hold":
-            call = (c.pause,)
-        elif action == "resume":
-            call = (c.resume,)
-        elif action == "home":
-            call = (c.home,)
-        elif action == "start_job":
-            call = (c.start_milling, self._job_path(value))
-        elif action == "probe_z":
-            call = (c.probe_z_zero,)
-        else:
-            raise RealCommandError(f"Реальный фрезер не поддерживает {action!r} "
-                                   "(доступно: feed_hold, resume, home, start_job, probe_z)")
         try:
-            await asyncio.to_thread(*call)
+            await asyncio.to_thread(self._execute_sync, c, action, value)
         except RealCommandError:
             raise
-        except Exception as e:  # CNCBusyError, CNCConnectionError, ...
+        except Exception as e:  # CNCBusyError, CNCAlarmError, CNCGrblError, CNCProbeError, ...
             raise RealCommandError(f"Фрезер: {e}") from None
-
 
 # ---------------------------------------------------------------------------
 # Сборка
@@ -530,12 +740,12 @@ def build_adapters(current_lines) -> dict[str, RealDeviceAdapter]:
         source = _SmartSource(smart)
         adapters += [SmartPanelAdapter(source, current_lines), ClimateAdapter(source)]
 
-    printer_host = os.getenv("PRINTER_HOST", "192.168.3.12").strip()
+    printer_host = os.getenv("PRINTER_HOST", "192.168.8.69").strip()
     if printer_host and wanted("printer_3d_01"):
         port = os.getenv("PRINTER_PORT", "").strip()
         adapters.append(PrinterAdapter(printer_host, int(port) if port else None))
 
-    cnc_host = os.getenv("CNC_HOST", "172.31.170.108").strip()
+    cnc_host = os.getenv("CNC_HOST", "192.168.8.71").strip()
     if cnc_host and wanted("cnc_01"):
         gcode_dir = os.getenv("CNC_GCODE_DIR", "").strip()
         adapters.append(CNCAdapter(cnc_host, int(os.getenv("CNC_PORT", "8881")),
