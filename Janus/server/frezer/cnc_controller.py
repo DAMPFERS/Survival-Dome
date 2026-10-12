@@ -44,7 +44,8 @@ logger = logging.getLogger(__name__)
 
 Vec3 = Tuple[float, float, float]
 
-
+# Стандартные расширения gcode для фрезерных ЧПУ
+GCODE_EXTENSIONS = {".gcode", ".nc", ".tap", ".ngc", ".gc", ".cnc"}
 # ============================================================
 # GRBL constants
 # ============================================================
@@ -186,6 +187,16 @@ class ProbeResult:
     timestamp: float
 
 
+@dataclass(frozen=True)
+class GCodeFile:
+    """Описание gcode-файла в рабочей директории."""
+    name: str            # имя файла (basename)
+    path: Path           # полный путь
+    size: int            # байт
+    mtime: float         # время последнего изменения (timestamp)
+    valid: bool          # прошёл ли базовую проверку (длина строк, ASCII)
+    error: Optional[str] = None  # причина, если valid=False
+
 @dataclass
 class CNCState:
     """Снимок состояния фрезера (координаты - реальные, из отчёта GRBL)."""
@@ -259,6 +270,7 @@ class CNCController:
         ip: str,
         port: int = 8881,
         *,
+        gcode_dir: str | Path | None = None,
         connect_timeout: float = 3.0,
         # Как часто спрашивать '?' (GRBL рекомендует не чаще 5 Гц).
         status_interval: float = 0.2,
@@ -268,6 +280,7 @@ class CNCController:
         idle_ack_timeout: float = 20.0,
         reconnect_initial_delay: float = 1.0,
         reconnect_max_delay: float = 10.0,
+        
     ):
         self.ip = ip
         self.port = port
@@ -313,6 +326,8 @@ class CNCController:
         self._gcode_lines: list[str] = []
         self._gcode_position = 0
         self._milling_lock = threading.Lock()
+        
+        self.gcode_dir = Path(gcode_dir) if gcode_dir else None
 
     # ========================================================
     # Public API: жизненный цикл
@@ -437,6 +452,67 @@ class CNCController:
     # Public API: задание
     # ========================================================
 
+    
+
+    def list_gcode_files(
+        self,
+        directory: str | Path | None = None,
+        *,
+        recursive: bool = False,
+        validate: bool = False,
+    ) -> list[GCodeFile]:
+        """
+        Возвращает список gcode-файлов в директории.
+
+        directory  - каталог для сканирования. Если None - используется
+                    self.gcode_dir (см. п. 3), либо текущая папка.
+        recursive  - обходить подкаталоги.
+        validate   - если True, для каждого файла запустить проверку,
+                    аналогичную _load_gcode (длина строк, ASCII).
+                    Медленнее, но сразу отсеивает битые файлы.
+
+        Файлы сортируются по времени изменения (новые сверху).
+        """
+        root = Path(directory) if directory is not None else (
+            getattr(self, "gcode_dir", None) or Path.cwd()
+        )
+        if not root.is_dir():
+            raise FileNotFoundError(f"Директория не найдена: {root}")
+
+        iterator = root.rglob("*") if recursive else root.iterdir()
+        result: list[GCodeFile] = []
+
+        for path in iterator:
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in GCODE_EXTENSIONS:
+                continue
+            # Защита от symlink-петель и файлов вне корня
+            try:
+                path.resolve().relative_to(root.resolve())
+            except ValueError:
+                continue
+
+            stat = path.stat()
+            valid, err = True, None
+            if validate:
+                try:
+                    self._load_gcode(path)   # уже есть в классе
+                except Exception as exc:     # noqa: BLE001
+                    valid, err = False, str(exc)
+
+            result.append(GCodeFile(
+                name=path.name,
+                path=path,
+                size=stat.st_size,
+                mtime=stat.st_mtime,
+                valid=valid,
+                error=err,
+            ))
+
+        result.sort(key=lambda f: f.mtime, reverse=True)
+        return result
+    
     def start_milling(self, filename: str | Path) -> None:
         """Запускает фрезеровку файла (не блокирует вызывающий поток)."""
 
@@ -501,6 +577,10 @@ class CNCController:
                 return
         self._abort_event.set()
 
+    
+    
+    
+    
     # ========================================================
     # Public API: отдельные команды (выполняются в worker)
     # ========================================================
