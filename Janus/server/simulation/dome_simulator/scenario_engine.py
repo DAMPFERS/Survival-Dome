@@ -190,6 +190,8 @@ class CrisisScenario:
             self.on_end(ctx)
             if self.report.outcome == "PENDING":
                 self.report.outcome = "EXPIRED"
+        elif self.report.outcome == "PENDING":
+            self.report.outcome = "NOT_STARTED"   # смена закончилась раньше, чем выполнилось предусловие
         ctx.emit("crisis.finished", Severity.INFO, source=f"crisis:{self.name}",
                  crisis=self.name, outcome=self.report.outcome)
 

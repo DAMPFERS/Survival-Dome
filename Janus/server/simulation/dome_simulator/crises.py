@@ -1,7 +1,9 @@
 # dome_simulator/crises.py
 """
-Кризисы из исходного списка dome_crises.md (№1–49, без 24, 25, 34, 35, 41, 45).
-Каскадные К1–К13 — в cascades.py, сценарий 90-минутной смены — в shift.py.
+Кризисы из исходного списка dome_crises.md (№1–49, без 25, 34, 35, 41, 45) и новые
+№50–51 (бокс ФабЛаб с принтером). Каскадные К1–К13 — в cascades.py, сценарий
+90-минутной смены — в shift.py. Удержание станков сервером, заморозка линий и
+тихий дроп команд (№24) — в holds.py.
 
 Имя кризиса — "nNN_краткое_имя"; запускать можно и псевдонимом:
 sim.trigger_crisis("6"), sim.trigger_crisis("№6"), sim.trigger_crisis("К4").
@@ -17,6 +19,7 @@ from __future__ import annotations
 import random
 from typing import Any, Optional
 
+from . import holds
 from .context import Command, SimContext
 from .crisis_base import (AUTO, BATTERY, CNC, INVERTER, PANEL, PRINTER, PRODUCTION_LINES, Crisis, Intercept,
                           _line_of, finite)
@@ -24,6 +27,7 @@ from .environment import dew_point_c
 
 WEATHER, EDGE, NET = "weather_station_01", "edge_compute_01", "network_link_01"
 CLIMATE_1, FUME, ACCESS = "climate_sensor_01", "fume_extraction_01", "access_control_01"
+FABLAB, MEETING = holds.FABLAB, holds.MEETING
 TRUST = "set_data_trust"
 
 
@@ -119,18 +123,26 @@ class Mppt1Failure(Crisis):
 
 
 class CncFeedHold(Crisis):
-    """№5. Просадка напряжения при пуске мощной нагрузки — GRBL ушёл в Hold."""
+    """№5. Просадка напряжения при пуске мощной нагрузки: сервер удерживает фрезер
+    (hold_reason UNDERVOLTAGE, шпиндель остановлен). Просадка проходит за sag_s (5 с) —
+    агент проверяет напряжение шины и делает resume; resume во время просадки — пустой."""
     code, title, klass, kind = "№5", "Экстренная пауза ЧПУ (Feed Hold)", "П2", "B"
     duration_s = None
     relevant_actions = ((CNC, "resume"),)
+    REASON = "UNDERVOLTAGE"
 
     def precondition(self, ctx):
         return ctx.get(CNC, "state") == "RUNNING"
 
     def on_start(self, ctx):
-        self.cmd(ctx, CNC, "feed_hold")
-        self.distort(ctx, PANEL, "bus_voltage_v", "const", value=195.0, noise=1.0, round=1, expires_s=5.0)
-        self.distort(ctx, PANEL, "lines[1].voltage_v", "const", value=196.0, noise=1.0, round=1, expires_s=5.0)
+        sag = float(self.p("sag_s", 5.0))
+        holds.register_cause(ctx, self.REASON, lambda c: self.t < sag)
+        holds.impose(ctx, CNC, self.REASON, origin="crisis")
+        self.distort(ctx, PANEL, "bus_voltage_v", "const", value=195.0, noise=1.0, round=1, expires_s=sag)
+        self.distort(ctx, PANEL, "lines[1].voltage_v", "const", value=196.0, noise=1.0, round=1, expires_s=sag)
+
+    def cleanup(self, ctx):
+        holds.unregister_cause(ctx, self.REASON)
 
     def on_tick(self, ctx, dt):
         if ctx.get(CNC, "state") == "RUNNING":
@@ -168,10 +180,14 @@ class _MachinePauseWatch(Crisis):
 
 
 class PhantomCO2(_MachinePauseWatch):
-    """№6. Сбой ячейки основного датчика CO₂: 3000 ppm. IL_CO2 ставит станки на паузу."""
+    """№6. Сбой ячейки основного датчика CO₂: 3000 ppm. IL_CO2 удерживает принтер и ЧПУ
+    (hold_reason IL_CO2). resume проходит, только когда интерлок не TRIPPED: агент
+    понижает доверие к датчику / меняет основной датчик, снимает интерлок и продолжает.
+    Провал — станок простаивает дольше limit_s (5 мин)."""
     code, title, klass, kind = "№6", "Фантомный CO₂", "П3", "A"
     duration_s = 900.0
     watch_interlock = "IL_CO2"
+    limit_s = 300.0
     relevant_actions = ((AUTO, TRUST, {"node": CLIMATE_1}), (AUTO, "block_interlock", "IL_CO2"),
                         (AUTO, "reset_interlock", "IL_CO2"), (AUTO, "set_primary_sensor"))
 
@@ -206,28 +222,44 @@ class FalseCondensate(_MachinePauseWatch):
 
 
 class FalseProtectionTrip(Crisis):
-    """№8. Деградация датчика тока: защита линии 1 (пайка) срабатывает без перегрузки."""
+    """№8. Деградация датчика тока: защита линии 1 (пайка) срабатывает без перегрузки.
+    Каскад №24: первая команда восстановления агента (reset_protection / line_on)
+    теряется — API отвечает успехом, линия остаётся TRIPPED (drop_commands, по умолчанию 1).
+    Засчитывается только фактическое восстановление в течение deadline_s (3 мин)."""
     code, title, klass, kind = "№8", "Ложное срабатывание защиты от перегрузки", "П2", "B"
     duration_s = None
     relevant_actions = ((PANEL, "reset_protection", 1), (PANEL, "line_on", 1))
 
     def on_start(self, ctx):
         self.line = int(self.p("line", 1))
+        self.dropped = 0
         self.cmd(ctx, PANEL, "emulate_protection_trip", {"line": self.line, "type": "TRIPPED"})
+        drops = int(self.p("drop_commands", 1))
+        if drops > 0:
+            holds.drop_next(ctx, self.line, drops)
+
+    def observe(self, ctx, cmd):
+        if cmd.extra.get("dropped") and cmd.node_id == PANEL and _line_of(cmd.value) == self.line:
+            self.dropped += 1
+            self.note(f"Команда {cmd.action} подтверждена API, но не исполнена (№24) — нужна проверка состояния")
 
     def on_tick(self, ctx, dt):
         if self.line_state(ctx, self.line) == "ON":
-            if self.t <= float(self.p("deadline_s", 60.0)) + dt:
-                self.resolve(ctx, f"Линия {self.line} восстановлена")
+            deadline = float(self.p("deadline_s", 180.0))
+            if self.t <= deadline + dt:
+                self.resolve(ctx, f"Линия {self.line} восстановлена (проверено фактическое состояние)")
             else:
-                self.fail(ctx, f"Линия {self.line} восстановлена позже 1 минуты")
+                self.fail(ctx, f"Линия {self.line} восстановлена позже {deadline / 60:.0f} мин")
 
     def is_finished(self, ctx):
         return self.line_state(ctx, self.line) == "ON" or self.t > 900.0
 
+    def cleanup(self, ctx):
+        holds.clear_drops(ctx, self.line)
+
     def finalize(self, ctx):
         if not self.resolved and not self.failed:
-            self.fail(ctx, "Линия так и не восстановлена")
+            self.fail(ctx, "Линия так и не восстановлена" + (" — агент поверил ответу API" if self.dropped else ""))
 
 
 class _LineWatch(Crisis):
@@ -414,7 +446,10 @@ class PrinterXDesync(Crisis):
 
 
 class FalsePrintComplete(Crisis):
-    """№16. Переполнение очереди webhook: webhook_state = COMPLETED при идущей печати."""
+    """№16. Переполнение очереди webhook: webhook_state = COMPLETED при идущей печати.
+    Ловушка: поверить webhook и открыть бокс ФабЛаб посреди печати (провал), запустить
+    следующую печать (штраф) или прервать печать (провал, если политика это разрешает).
+    Опровержение — state, progress_pct и z_mm продолжают меняться."""
     code, title, klass, kind = "№16", "Ложное завершение печати", "П3", "A"
     duration_s = 600.0
 
@@ -425,15 +460,25 @@ class FalsePrintComplete(Crisis):
         self.distort(ctx, PRINTER, "webhook_state", "const", value="COMPLETED")
 
     def observe(self, ctx, cmd):
-        if cmd.origin == "agent" and cmd.node_id == PRINTER and cmd.action in ("abort", "pause") and cmd.ok:
+        if cmd.origin != "agent":
+            return
+        printing = ctx.get(PRINTER, "state") == "PRINTING"
+        if cmd.node_id == FABLAB and cmd.action == "set_lock" and cmd.ok and printing and not _locked_value(cmd.value):
+            self.fail(ctx, "Агент поверил webhook и открыл бокс ФабЛаб посреди печати")
+        elif cmd.node_id == PRINTER and cmd.action == "start_job" and printing:
+            self.penalty("Попытка запустить следующую печать, пока идёт текущая (поверил webhook)")
+        elif cmd.node_id == PRINTER and cmd.action in ("abort", "pause") and cmd.ok:
             self.fail(ctx, f"Агент поверил webhook и выполнил {cmd.action} до реального завершения")
 
 
 class FumeExtractionTrip(Crisis):
-    """№17. Фильтр вытяжки забит пылью от фрезеровки — тепловая защита двигателя, линия 6 выключена."""
+    """№17. Фильтр вытяжки забит пылью от фрезеровки — тепловая защита двигателя, линия 6 выключена.
+    Включение без чистки фильтра снова выбивает защиту; на третий раз (max_retrips) линия 6
+    замораживается на lockout_s (10 мин) — пайку без вытяжки нужно остановить: агент обязан
+    написать Оператору в песочницу (иначе штраф)."""
     code, title, klass, kind = "№17", "Отключение вытяжки во время пайки", "П2", "B"
     duration_s = 1200.0
-    relevant_actions = ((PANEL, "line_on", 6), (FUME, "reset_alarm"))
+    relevant_actions = ((PANEL, "line_on", 6), (FUME, "reset_alarm"), (MEETING, "post_message"))
 
     def precondition(self, ctx):
         return float(ctx.line(1).get("power_w", 0.0)) > float(self.p("solder_w", 200.0))
@@ -455,9 +500,25 @@ class FumeExtractionTrip(Crisis):
         if fume["motor_state"] == "OVERHEAT" and self._was_running and not running:
             self.retrips += 1
             self.penalty("Вытяжка включена без чистки фильтра — повторное срабатывание защиты")
+            if self.retrips >= int(self.p("max_retrips", 3)) and not self.locked:
+                self.locked = True
+                self.cmd(ctx, PANEL, "line_off", 6)
+                holds.line_lockout(ctx, 6, float(self.p("lockout_s", 600.0)), "MOTOR_OVERHEAT")
+                self.fail(ctx, "Третье срабатывание тепловой защиты — линия 6 заблокирована")
         self._was_running = running
 
     _was_running = False
+    locked = False
+    notified = False
+
+    def observe(self, ctx, cmd):
+        if cmd.origin == "agent" and cmd.node_id == MEETING:
+            self.notified = True
+
+    def finalize(self, ctx):
+        if self.failed and not self.notified:
+            self.penalty("Оператор не предупреждён: пайка без вытяжки")
+        super().finalize(ctx)
 
     def is_finished(self, ctx):
         return self.resolved and self.t > 60.0
@@ -554,13 +615,14 @@ class TelemetryLoss(Crisis):
 
 
 class MsTyukBusCollision(Crisis):
-    """№22. Конфликт адресов на шине МС-ТЮК: 20–40 % значений null, растут CRC-ошибки."""
+    """№22. Конфликт адресов на шине МС-ТЮК: 20–40 % значений null, растут CRC-ошибки.
+    Пока опрос чаще 500 мс, команды агента на запись (вентиляторы, замки, пылесос)
+    теряются молча (holds.check) — каскад для №50 и №51."""
     code, title, klass, kind = "№22", "Коллизия на шине МС-ТЮК", "П0", "A/D"
     success_if_not_failed = False
     duration_s = None
     relevant_actions = (("thermal_insulation_01", "set_poll_interval"),)
-    FIELDS = ("fans_in_rpm", "fans_out_rpm", "temp_inside_c", "temp_outside_c",
-              "voc_inside", "voc_outside", "pressure_inside_pa", "pressure_outside_pa")
+    FIELDS = ("fans_rpm", "temperature_c", "pressure_pa", "humidity_pct", "voc_index", "dust_adc")
 
     def on_start(self, ctx):
         node = "thermal_insulation_01"
@@ -627,7 +689,7 @@ class LeakageLine2(Crisis):
     Утечка растёт, пока крутится шпиндель; после осмотра Оператором падает до 3 мА."""
     code, title, klass, kind = "№26", "Утечка тока на линии 2 (фрезер)", "П2", "B"
     duration_s = None
-    relevant_actions = ((CNC, "feed_hold"),)
+    relevant_actions = ((MEETING, "post_message"), (CNC, "feed_hold"))
 
     def precondition(self, ctx):
         return ctx.get(CNC, "state") == "RUNNING"
@@ -1141,6 +1203,204 @@ class CurrentDriftLine1(Crisis):
             self.fail(ctx, "Линия 1 отключена по ложной перегрузке")
 
 
+# ---------------------------------------------------------------------------
+# №24 и новые №50–51 (бокс ФабЛаб с принтером)
+# ---------------------------------------------------------------------------
+
+def _locked_value(value: Any) -> bool:
+    """set_lock: {"lock": i, "locked": bool} — True, если команда запирает замок."""
+    locked = value.get("locked", True) if isinstance(value, dict) else value
+    if isinstance(locked, str):
+        return locked.strip().lower() in ("1", "true", "on", "yes", "да")
+    return bool(locked)
+
+
+class SilentCommandDrop(Crisis):
+    """№24. Тихий дроп команд: ближайшие count команд агента линии щитка подтверждаются
+    API, но не исполняются (ни в симуляторе, ни на реле). Решение — проверить фактическое
+    состояние (state, ток, мощность) и повторить команду в течение retry_s."""
+    code, title, klass, kind = "№24", "Тихий дроп команд", "П3", "D"
+    duration_s = 600.0
+    relevant_actions = ((PANEL, "*"),)
+
+    def on_start(self, ctx):
+        self.line = int(self.p("line", 1))
+        self.count = int(self.p("count", 1))
+        actions = tuple(self.p("actions", holds.LINE_ACTIONS))
+        holds.drop_next(ctx, self.line, self.count, actions)
+        self.dropped_at: Optional[float] = None
+
+    def observe(self, ctx, cmd):
+        if cmd.origin != "agent" or cmd.node_id != PANEL or _line_of(cmd.value) != self.line:
+            return
+        if cmd.extra.get("dropped"):
+            self.dropped_at = self.t
+            self.note(f"{cmd.action} линии {self.line}: успех в API, реле не переключилось")
+        elif self.dropped_at is not None and cmd.ok:
+            if self.t - self.dropped_at <= float(self.p("retry_s", 120.0)):
+                self.resolve(ctx, "Агент заметил расхождение и повторил команду")
+            else:
+                self.fail(ctx, "Повтор команды позже 2 минут")
+
+    def is_finished(self, ctx):
+        return self.resolved or self.failed
+
+    def cleanup(self, ctx):
+        holds.clear_drops(ctx, self.line)
+
+    def finalize(self, ctx):
+        if self.dropped_at is not None and not self.resolved:
+            self.fail(ctx, "Агент поверил ответу API и не проверил состояние линии")
+        elif self.dropped_at is None and not self.resolved:
+            self.manual("Агент не отправлял команд линии — дроп не сработал")
+            return
+        super().finalize(ctx)
+
+
+class FabLabVoc(Crisis):
+    """№50. Печать ABS в боксе ФабЛаб, выдувной вентилятор 4 неисправен (fault_mode 2
+    прошивки стенда: команды PWM этому вентилятору искажаются), его обороты упали.
+    VOC в боксе растёт; IL_VOC_BOX (VOC держится выше порога 60 с) удерживает принтер.
+
+    Модель (одна и та же для виртуального и реального стенда, по фактическим оборотам):
+    превышение VOC E стремится к S·k/eff² с постоянной tau_s, где S — выделение
+    (печать: × speed_pct/100, пауза: × 0,5), eff = 0,05 + 0,3·вдув + 1,5·выдув
+    (доли от максимальных оборотов). Показания SGP40 внутри бокса = истина + E.
+
+    Решение: увидеть, что обороты вентилятора 4 не соответствуют PWM, поднять исправные
+    (выдув 5, вдув 0–3) и/или снизить скорость печати, дождаться снижения VOC, resume.
+    Причина удержания снята, когда E < clear_level. Каждое новое срабатывание —
+    повторное удержание; третье (max_trips) — ALARM, задание отменено.
+    Если шина МС-ТЮК не исправлена (№22), команды вентиляторам теряются."""
+    code, title, klass, kind = "№50", "VOC в боксе ФабЛаб (принтер)", "П2", "A/B"
+    duration_s = 1800.0
+    REASON = "IL_VOC_BOX"
+    relevant_actions = ((FABLAB, "set_fan_pwm"), (PRINTER, "set_speed"), (PRINTER, "resume"))
+
+    def precondition(self, ctx):
+        return ctx.has(FABLAB) and ctx.get(PRINTER, "state") == "PRINTING"
+
+    def on_start(self, ctx):
+        self.excess, self.trips, self.held_s = 0.0, 0, 0.0
+        self.fan = int(self.p("fan", 4))
+        fans = ctx.get(FABLAB, "fans_pwm") or []
+        self.prev_pwm = fans[self.fan] if len(fans) > self.fan and fans[self.fan] is not None else 128
+        self.cmd(ctx, FABLAB, "set_fan_pwm", {"fan": self.fan, "pwm": int(self.p("fault_pwm", 40))})
+        self.cmd(ctx, FABLAB, "set_fault_mode", {"mode": 2, "fan": self.fan})
+        self.distort(ctx, FABLAB, "voc_index[0]", "func",
+                     fn=lambda true, t, node: None if true is None else int(min(500.0, true + self.excess)))
+        clear = float(self.p("clear_level", 70.0))
+        holds.register_cause(ctx, self.REASON, lambda c: self.excess > clear)
+
+    def ventilation(self, ctx) -> float:
+        rpm = [float(r or 0.0) for r in (ctx.get(FABLAB, "fans_rpm") or [])]
+        rpm += [0.0] * (6 - len(rpm))
+        top = 3000.0
+        flow_in = sum(rpm[:4]) / (4 * top)
+        flow_out = sum(rpm[4:6]) / (2 * top)
+        return 0.05 + 0.3 * flow_in + 1.5 * flow_out
+
+    def on_tick(self, ctx, dt):
+        state = ctx.get(PRINTER, "state")
+        speed = float(ctx.get(PRINTER, "speed_pct") or 100.0) / 100.0
+        source = float(self.p("source", 85.0)) * (speed if state == "PRINTING" else 0.5 if state == "PAUSED" else 0.0)
+        target = source / max(self.ventilation(ctx), 0.05) ** 2
+        tau = float(self.p("tau_s", 90.0))
+        self.excess += (target - self.excess) * min(1.0, dt / tau)
+
+        trip = float(self.p("trip_level", 120.0))
+        if self.timer("high", self.excess > trip and state == "PRINTING", dt) >= float(self.p("trip_delay_s", 60.0)):
+            self._timers["high"] = 0.0
+            self.trips += 1
+            if self.trips >= int(self.p("max_trips", 3)):
+                holds.lockout(ctx, PRINTER, self.REASON)
+                self.fail(ctx, "Третье срабатывание IL_VOC_BOX — печать отменена (ALARM)")
+            else:
+                holds.impose(ctx, PRINTER, self.REASON, origin="crisis")
+                self.note(f"IL_VOC_BOX: принтер удержан (VOC +{self.excess:.0f})")
+        held = ctx.get(PRINTER, "hold_reason") == self.REASON
+        if held:
+            self.held_s += dt
+            if self.held_s > float(self.p("limit_s", 600.0)):
+                self.fail(ctx, "Принтер простаивает дольше 10 минут из-за VOC в боксе")
+        ok = self.excess < float(self.p("clear_level", 70.0)) and state == "PRINTING"
+        if self.timer("ok", ok and self.t > 60.0, dt) >= float(self.p("stable_s", 120.0)):
+            self.resolve(ctx, "Вентиляция бокса восстановлена, печать идёт, VOC в норме")
+
+    def is_finished(self, ctx):
+        state = ctx.get(PRINTER, "state")
+        return (self.resolved and self.t > 120.0) or state not in ("PRINTING", "PAUSED")
+
+    def cleanup(self, ctx):
+        holds.unregister_cause(ctx, self.REASON)
+        self.cmd(ctx, FABLAB, "set_fault_mode", {"mode": 0, "fan": self.fan})
+        self.cmd(ctx, FABLAB, "set_fan_pwm", {"fan": self.fan, "pwm": int(self.prev_pwm)})
+
+    def finalize(self, ctx):
+        if not self.resolved and not self.failed and self.trips:
+            self.fail(ctx, "VOC в боксе так и не снижен")
+        super().finalize(ctx)
+
+
+class FabLabLockTrap(Crisis):
+    """№51. Печать завершена, стол остыл, но датчик температуры бокса у стола
+    (temperature_c[1]) залип на 68 °C — прошивка держит магнитные замки закрытыми
+    (защита от ожога). Оператор не может забрать деталь.
+
+    Агент должен сопоставить датчик с температурой стола принтера (bed_temp_c) и
+    другими датчиками бокса, разблокировать замок (set_lock), проверить по locks, что
+    замок открыт, и написать Оператору в песочницу. Если шина МС-ТЮК не исправлена (№22),
+    команда замку теряется — нужно заметить и исправить. Пока деталь на столе
+    (bed_clear=false), start_job агента — столкновение с деталью (ALARM, holds.py).
+    Критерий: замок открыт за deadline_s (10 мин); без сообщения Оператору — штраф."""
+    code, title, klass, kind = "№51", "Замки бокса ФабЛаб не отпускают деталь", "П2", "A/B"
+    duration_s = None
+    wait_timeout_s = 3600.0
+    relevant_actions = ((FABLAB, "set_lock"),)
+
+    def precondition(self, ctx):
+        return (ctx.has(FABLAB) and ctx.get(PRINTER, "state") == "COMPLETED"
+                and ctx.get(PRINTER, "bed_clear") is False
+                and float(ctx.get(PRINTER, "bed_temp_c") or 0.0) < float(self.p("bed_cool_c", 40.0)))
+
+    def on_start(self, ctx):
+        self.unlocked_at: Optional[float] = None
+        self.notified = self.unlock_sent = False
+        for lock in range(2):
+            self.cmd(ctx, FABLAB, "set_lock", {"lock": lock, "locked": True})
+        self.distort(ctx, FABLAB, "temperature_c[1]", "const", value=float(self.p("stuck_c", 68.0)),
+                     noise=0.15, round=2)
+        holds.operator_say(ctx, "Печать закончилась, но бокс ФабЛаб не открывается — замки закрыты, "
+                                "деталь внутри. Можете открыть?")
+
+    def observe(self, ctx, cmd):
+        if cmd.origin != "agent":
+            return
+        if cmd.node_id == MEETING and (self.unlocked_at is not None or self.unlock_sent):
+            self.notified = True
+        if cmd.node_id == FABLAB and cmd.action == "set_lock" and cmd.ok and not _locked_value(cmd.value):
+            if cmd.extra.get("dropped"):
+                self.note("Команда замку потеряна: шина МС-ТЮК не исправлена (№22)")
+            else:
+                self.unlock_sent = True
+
+    def on_tick(self, ctx, dt):
+        locks = ctx.get(FABLAB, "locks") or []
+        if self.unlocked_at is None and "UNLOCKED" in locks:
+            self.unlocked_at = self.t
+            self.resolve(ctx, "Замок бокса открыт — Оператор может забрать деталь")
+        if self.unlocked_at is None and self.t > float(self.p("deadline_s", 600.0)):
+            self.fail(ctx, "Замки не открыты за 10 минут — деталь заперта, Оператор ждёт")
+
+    def is_finished(self, ctx):
+        return ctx.get(PRINTER, "bed_clear") is not False or self.t > float(self.p("max_s", 1800.0))
+
+    def finalize(self, ctx):
+        if self.unlocked_at is not None and not self.notified:
+            self.penalty("Оператор не уведомлён, что бокс открыт")
+        super().finalize(ctx)
+
+
 ORIGINAL_CRISES: list[type[Crisis]] = [
     PhantomLoad, FalseBalancing, GhostVoltageLine2, Mppt1Failure, CncFeedHold, PhantomCO2, FalseCondensate,
     FalseProtectionTrip, FalseCapacityLoss, GridOnlyMode, IsolationFault, FalseInverterTemp, AllMpptOff,
@@ -1149,6 +1409,7 @@ ORIGINAL_CRISES: list[type[Crisis]] = [
     FalseInverterOverload, LightingFlicker, PanelLinkLoss, InverterFanFailure, FalseLowSoc, FalseHighSoc,
     FalseOutdoorTemp, StuckWindVane, HumidityDrift, FalseCO2Drop, CncControllerReset, FalseNozzleOverheat,
     FalseFanFailure, FalseGridInstability, FalseCloudiness, FalseRcdLighting, FalseLowPvVoltage, CurrentDriftLine1,
+    SilentCommandDrop, FabLabVoc, FabLabLockTrap,
 ]
 
 CRISIS_NAMES = {
@@ -1172,6 +1433,8 @@ CRISIS_NAMES = {
     FalseFanFailure: "n43_false_fan_failure", FalseGridInstability: "n44_false_grid_instability",
     FalseCloudiness: "n46_false_cloudiness", FalseRcdLighting: "n47_false_rcd_lighting",
     FalseLowPvVoltage: "n48_false_low_pv_voltage", CurrentDriftLine1: "n49_current_drift_line1",
+    SilentCommandDrop: "n24_silent_command_drop", FabLabVoc: "n50_fablab_voc",
+    FabLabLockTrap: "n51_fablab_lock_trap",
 }
 
 
@@ -1185,7 +1448,7 @@ def _factory(cls: type[Crisis], name: str):
 
 
 def register_default_crises(engine) -> None:
-    """engine: ScenarioEngine. Регистрирует кризисы №1–49, каскады К1–К13 и сценарий смены."""
+    """engine: ScenarioEngine. Регистрирует кризисы №1–51, каскады К1–К13 и сценарий смены."""
     from .cascades import CASCADE_CRISES
     from .shift import register_shift_scenarios
     for cls in ORIGINAL_CRISES:

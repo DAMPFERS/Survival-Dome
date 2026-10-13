@@ -52,7 +52,7 @@ EDGE_SERVED_NODES = frozenset({
     "water_pump_01", "water_tank_01", "water_filter_01", "fire_suppression_01",
     "access_control_01", "radiation_sensor_01", "chem_sensor_01",
     "material_inventory_01", "equipment_cooling_01", "supply_ventilation_01",
-    "dome_sealing_01", "thermal_insulation_01", "radio_01", "backup_comms_01",
+    "dome_sealing_01", "thermal_insulation_01", "thermal_insulation_02", "radio_01", "backup_comms_01",
 })
 NETWORK_NODE = "network_link_01"
 EDGE_NODE = "edge_compute_01"

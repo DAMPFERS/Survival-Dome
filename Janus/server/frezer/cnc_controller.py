@@ -58,6 +58,7 @@ RT_STATUS = b"?"
 RT_FEED_HOLD = b"!"
 RT_CYCLE_START = b"~"
 RT_SOFT_RESET = b"\x18"
+RT_SPINDLE_STOP = b"\x9e"   # GRBL 1.1: Toggle Spindle Stop — только в состоянии Hold
 
 # Состояния, в которых станок "что-то делает" - ожидание ok в них
 # не ограничено по времени (ok может прийти через минуты, если
@@ -230,6 +231,7 @@ class CNCState:
     pins: str = ""                  # вся строка Pn
     planner_free: Optional[int] = None
     rx_free: Optional[int] = None
+    accessories: Optional[str] = None   # поле A: отчёта (S/C — шпиндель, F/M — СОЖ); None — ещё не было
     status_time: float = 0.0        # time.monotonic() последнего отчёта
 
     # Из $G
@@ -570,6 +572,22 @@ class CNCController:
             self._state.paused = False
         logger.info("Фрезеровка продолжена")
 
+    def spindle_stop(self) -> bool:
+        """Остановка шпинделя на паузе (GRBL 1.1 Spindle Stop override, 0x9E).
+        Работает только в Hold; на resume ('~') GRBL сам раскрутит шпиндель
+        и продолжит. Команда переключающая — повторная отправка снова включит
+        шпиндель, поэтому шлём её, только если шпиндель по отчёту включён
+        (или состояние аксессуаров ещё неизвестно). Возвращает True, если байт отправлен."""
+        with self._lock:
+            st = self._state
+            if not st.machine_state.startswith("Hold"):
+                return False
+            if st.accessories is not None and not any(c in st.accessories for c in "SC"):
+                return False
+        self._write(RT_SPINDLE_STOP)
+        logger.info("Шпиндель остановлен (Spindle Stop override)")
+        return True
+
     def abort_milling(self) -> None:
         """Прервать задание: feed hold -> остановка -> soft reset."""
         with self._lock:
@@ -882,6 +900,10 @@ class CNCController:
             st.spindle_rpm = float(fs[1]) if len(fs) > 1 else 0.0
         elif "F" in fields:
             st.feed_rate = float(fields["F"])
+
+        if "Ov" in fields or "A" in fields:
+            # A: приходит вместе с Ov; отсутствие A при Ov — аксессуары выключены
+            st.accessories = fields.get("A", "")
 
         st.pins = fields.get("Pn", "")
         st.probe_pin = "P" in st.pins

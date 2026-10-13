@@ -8,6 +8,9 @@
     4. Команда только для админа (эмуляция срабатывания защиты) — участнику
        должен прийти отказ.
     5. Админские запросы (time_control, switch_mode) — участнику отказ.
+    6. Новые функции: файлы принтера и фрезера (query list_files, upload/start/delete),
+       скорость и перемещение принтера, теплицы МС-ТЮК, песочница (чат meeting_01).
+    Ключ неактивной команды даёт роль guest — проверяется только песочница.
 
 Запуск:
     python client_test.py --key <ключ>            # ключ можно задать и в DOME_KEY
@@ -42,6 +45,7 @@ class DomeTestClient:
         self.telemetry_received = asyncio.Event()
         self._waiters: dict[str, asyncio.Future] = {}
         self._ids = itertools.count(1)
+        self.meeting_messages: list[dict[str, Any]] = []
 
     # ---------------- приём ----------------
 
@@ -61,6 +65,13 @@ class DomeTestClient:
                 future = self._waiters.pop(data["request_id"])
                 if not future.done():
                     future.set_result(data)
+            elif msg_type == "meeting_message":
+                m = data["message"]
+                sender = m["sender"]
+                who = sender["role"] + (f" {sender['team']}" if sender.get("team") else "") \
+                    + (f" ({sender['name']})" if sender.get("name") else "")
+                print(f"\n💬 #{m['id']} {who}: {m['text']}")
+                self.meeting_messages.append(m)
             else:
                 print("\nSERVER MESSAGE:", json.dumps(data, ensure_ascii=False, indent=2))
 
@@ -127,6 +138,102 @@ def check(title: str, response: dict[str, Any] | None, expect_success: bool) -> 
     print(f"{'✅' if ok else '❌'} {title}: ожидался {expectation}{detail}")
 
 
+TEST_GCODE = """; client_test.py
+G28
+G1 Z5 F600
+; filament used [g] = 1.5
+; estimated printing time (normal mode) = 2m 0s
+"""
+
+
+async def meeting_scenario(client: DomeTestClient) -> None:
+    print("\n" + "#" * 70 + "\n# Песочница (meeting_01)\n" + "#" * 70)
+    text = f"Привет от {client.role}: проверка песочницы {datetime.now():%H:%M:%S}"
+    response = await client.request({"type": "control", "node_id": "meeting_01", "action": "post_message",
+                                     "value": {"text": text, "name": "client_test", "to": "all"}})
+    check("Сообщение в песочницу", response, expect_success=True)
+    message_id = ((response or {}).get("message") or {}).get("id", 0)
+    history = await client.request({"type": "query", "node_id": "meeting_01", "query": "read_messages",
+                                    "params": {"since_id": message_id - 1, "limit": 10}})
+    check("Чтение истории песочницы", history, expect_success=True)
+    found = any(m.get("id") == message_id and m.get("text") == text for m in (history or {}).get("result", []))
+    check("Своё сообщение есть в истории", {"success": found}, expect_success=True)
+    await asyncio.sleep(0.5)
+    check("Рассылка meeting_message получена",
+          {"success": any(m.get("id") == message_id for m in client.meeting_messages)}, expect_success=True)
+    check("Пустое сообщение",
+          await client.request({"type": "control", "node_id": "meeting_01", "action": "post_message", "value": ""}),
+          expect_success=False)
+    if client.role != "admin":   # админ историю в тесте не стирает
+        check("Очистка истории — только админ",
+              await client.request({"type": "control", "node_id": "meeting_01", "action": "clear"}),
+              expect_success=False)
+
+
+async def production_scenario(client: DomeTestClient) -> None:
+    print("\n" + "#" * 70 + "\n# Принтер, фрезер, теплицы МС-ТЮК\n" + "#" * 70)
+    files = await client.request({"type": "query", "node_id": "printer_3d_01", "query": "list_files"})
+    check("Список файлов принтера", files, expect_success=True)
+    check("Список файлов фрезера",
+          await client.request({"type": "query", "node_id": "cnc_01", "query": "list_files"}),
+          expect_success=True)
+    check("Загрузка файла на принтер",
+          await client.request({"type": "control", "node_id": "printer_3d_01", "action": "upload_file",
+                                "value": {"file_name": "client_test.gcode", "content": TEST_GCODE}}),
+          expect_success=True)
+    check("Имя файла с путём отклоняется",
+          await client.request({"type": "control", "node_id": "printer_3d_01", "action": "upload_file",
+                                "value": {"file_name": "../printer.cfg", "content": "G28"}}),
+          expect_success=False)
+    check("Скорость печати 120 %",
+          await client.request({"type": "control", "node_id": "printer_3d_01", "action": "set_speed", "value": 120}),
+          expect_success=True)
+    check("Скорость печати 300 % вне диапазона",
+          await client.request({"type": "control", "node_id": "printer_3d_01", "action": "set_speed", "value": 300}),
+          expect_success=False)
+    printer = client.telemetry.get("data", {}).get("nodes", {}).get("printer_3d_01", {})
+    if printer.get("state") in ("IDLE", "COMPLETED"):
+        await client.request({"type": "control", "node_id": "printer_3d_01", "action": "home"})
+        check("Относительное перемещение принтера",
+              await client.request({"type": "control", "node_id": "printer_3d_01", "action": "move",
+                                    "value": {"x": 10, "y": 10, "mode": "relative"}}),
+              expect_success=True)
+    check("Удаление файла с принтера",
+          await client.request({"type": "control", "node_id": "printer_3d_01", "action": "delete_file",
+                                "value": "client_test.gcode"}),
+          expect_success=True)
+    check("Теплица ФабЛаб: PWM вентилятора 5",
+          await client.request({"type": "control", "node_id": "thermal_insulation_01", "action": "set_fan_pwm",
+                                "value": {"fan": 5, "pwm": 200}}),
+          expect_success=True)
+    check("Теплица Химлаб: релейный вентилятор, уровень 3",
+          await client.request({"type": "control", "node_id": "thermal_insulation_02",
+                                "action": "set_relay_fan_level", "value": 3}),
+          expect_success=True)
+    check("Теплица Химлаб: уровень 11 вне диапазона",
+          await client.request({"type": "control", "node_id": "thermal_insulation_02",
+                                "action": "set_relay_fan_level", "value": 11}),
+          expect_success=False)
+
+
+async def guest_scenario(client: DomeTestClient) -> None:
+    """Неактивная команда: видна только песочница."""
+    nodes = client.telemetry.get("data", {}).get("nodes", {})
+    check("Гость видит в телеметрии только песочницу", {"success": set(nodes) == {"meeting_01"}},
+          expect_success=True)
+    catalog = await client.request({"type": "describe_nodes"}, quiet=True)
+    check("Гость видит в каталоге только песочницу",
+          {"success": [n["node_id"] for n in (catalog or {}).get("nodes", [])] == ["meeting_01"]},
+          expect_success=True)
+    check("Гостю недоступны узлы купола",
+          await client.request({"type": "control", "node_id": "smart_panel_01", "action": "line_on", "value": 1}),
+          expect_success=False)
+    check("Гостю недоступны запросы к узлам купола",
+          await client.request({"type": "query", "node_id": "printer_3d_01", "query": "list_files"}),
+          expect_success=False)
+    await meeting_scenario(client)
+
+
 async def run_scenario(client: DomeTestClient) -> None:
     is_admin = client.role == "admin"
 
@@ -140,7 +247,15 @@ async def run_scenario(client: DomeTestClient) -> None:
     catalog = await client.request({"type": "describe_nodes"}, quiet=True)
     for node in (catalog or {}).get("nodes", []):
         mode = f" [{node['mode']}]" if "mode" in node else ""
-        print(f"  {node['node_id']:<24}{mode:<10} {node['title']}: {', '.join(node['controls']) or '—'}")
+        queries = f" | запросы: {', '.join(node['queries'])}" if node.get("queries") else ""
+        print(f"  {node['node_id']:<24}{mode:<10} {node['title']}: {', '.join(node['controls']) or '—'}{queries}")
+
+    if client.role == "guest":
+        await guest_scenario(client)
+        print("\n" + "#" * 70)
+        print(f"# TEST SCENARIO COMPLETE: {sum(results)}/{len(results)} проверок пройдено")
+        print("#" * 70)
+        return
 
     print("\n" + "#" * 70 + "\n# Разрешённые участнику команды\n" + "#" * 70)
     check("Включение линии 1 щитка",
@@ -158,7 +273,8 @@ async def run_scenario(client: DomeTestClient) -> None:
           await client.request({"type": "control", "node_id": "smart_panel_01",
                                 "action": "emulate_protection_trip", "value": {"line": 8}}),
           expect_success=is_admin)
-    panel = client.telemetry.get("data", {}).get("nodes", {}).get("smart_panel_01", {})
+    # админ видит служебные поля в истинном состоянии (true_nodes); nodes — вид агента, без них
+    panel = client.telemetry.get("data", {}).get("true_nodes" if is_admin else "nodes", {}).get("smart_panel_01", {})
     check("Служебные параметры (control_*) видны только админу",
           {"success": is_admin == ("control_override_source" in panel)}, expect_success=True)
     check("Ускорение времени x2",
@@ -173,6 +289,9 @@ async def run_scenario(client: DomeTestClient) -> None:
         check("Переключение режима узла",
               await client.request({"type": "switch_mode", "node_id": "printer_3d_01", "mode": "real"}),
               expect_success=False)
+
+    await production_scenario(client)
+    await meeting_scenario(client)
 
     await asyncio.sleep(TELEMETRY_WAIT / 2)
     print("\n" + "#" * 70)

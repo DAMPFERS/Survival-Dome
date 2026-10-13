@@ -5,8 +5,10 @@ printer_3d, cnc, material_inventory, equipment_cooling.
 
 Принтер и фрезер сами берут задания в рабочее время (auto_jobs), чтобы
 в песочнице было что наблюдать. Задание можно запустить и вручную:
-действие start_job с value={"file_name": ..., "duration_s": ..., "filament_g": ...}
-(duration_s — в секундах времени устройства; filament_g — расход филамента на деталь).
+действие start_job с именем файла из списка files устройства. Служебный путь
+сценариев: value={"file_name": ..., "duration_s": ..., "filament_g": ...} — с явным
+duration_s файл может отсутствовать в списке (duration_s — в секундах времени
+устройства; filament_g — расход филамента на деталь).
 
 Д10: принтер — мощность нагревателей (heater_power_pct), калибровка оси X
 (rotation_distance_x), расход филамента по заданию; ЧПУ — температура шпинделя
@@ -20,8 +22,9 @@ from typing import Any, Optional
 
 from ..environment import OUProcess, clamp, relax
 from ..events import Severity
+from ..store import StateStore
 from .base import register_node_type
-from .sandbox import ControlError, SandboxNode, SensorNode, control, parse_number
+from .sandbox import ControlError, SandboxNode, SensorNode, control, parse_number, query
 
 ON, OFF, FAULT = "ON", "OFF", "FAULT"
 
@@ -61,6 +64,77 @@ def _filament_from_value(value: Any, duration_s: float) -> float:
     return round(12.0 * duration_s / 3600.0, 1)
 
 
+PRINTER_EXTENSIONS = (".gcode", ".g", ".gco")
+CNC_EXTENSIONS = (".gcode", ".nc", ".tap", ".ngc", ".gc", ".cnc")
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+
+_TIME_RE = re.compile(r"^;\s*(?:estimated printing time[^=]*=\s*(.+)|TIME:\s*(\d+))\s*$", re.IGNORECASE | re.MULTILINE)
+_FILAMENT_G_RE = re.compile(r"^;\s*(?:total )?filament used \[g\]\s*=\s*([\d.]+)", re.IGNORECASE | re.MULTILINE)
+_DURATION_PART_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([dhms])", re.IGNORECASE)
+
+
+def file_name_from_value(value: Any, extensions: tuple[str, ...], what: str) -> str:
+    """Имя файла без пути (защита от выхода из каталога файлов устройства)."""
+    name = value.get("file_name") if isinstance(value, dict) else value
+    if not isinstance(name, str) or not name.strip():
+        raise ControlError(f"{what}: ожидалось имя файла")
+    name = name.strip()
+    if "/" in name or "\\" in name or name.startswith(".") or len(name) > 200:
+        raise ControlError(f"{what}: допускается только имя файла без пути")
+    if not name.lower().endswith(extensions):
+        raise ControlError(f"{what}: расширение файла должно быть одним из {list(extensions)}")
+    return name
+
+
+def gcode_estimate(content: str) -> tuple[Optional[float], Optional[float]]:
+    """Время печати, с, и расход филамента, г, из комментариев слайсера (Orca/Prusa/Cura)."""
+    duration = None
+    m = _TIME_RE.search(content)
+    if m and m.group(2):
+        duration = float(m.group(2))
+    elif m:
+        mult = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+        duration = sum(float(v) * mult[u.lower()] for v, u in _DURATION_PART_RE.findall(m.group(1))) or None
+    g = _FILAMENT_G_RE.search(content)
+    return duration, (float(g.group(1)) if g else None)
+
+
+def _job_file(files: dict[str, dict[str, Any]], value: Any, default_duration_s: float,
+              what: str) -> tuple[str, float, Optional[dict[str, Any]]]:
+    """Задание по файлу из памяти устройства. Явный duration_s — служебный путь
+    сценариев и тестов: файл может отсутствовать в списке."""
+    file_name, duration = _job_from_value(value, default_duration_s)
+    explicit = isinstance(value, dict) and value.get("duration_s") is not None
+    meta = files.get(file_name)
+    if meta is None and not explicit:
+        raise ControlError(f"{what}: файл {file_name!r} не найден. Доступно: {sorted(files)}")
+    if meta is not None and not explicit and meta.get("estimated_time_s"):
+        duration = float(meta["estimated_time_s"])
+    return file_name, duration, meta
+
+
+def _file_list(files: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"name": name, **meta} for name, meta in sorted(files.items())]
+
+
+# Удержание станка сервером (holds.py): поля телеметрии и их сброс
+HOLD_STATE = {"hold_level": None, "hold_reason": None, "resume_attempts": 0, "lockout_remaining_s": 0.0}
+
+
+def _hold_reason(value: Any) -> str:
+    reason = value.get("reason") if isinstance(value, dict) else value
+    if not isinstance(reason, str) or not reason.strip():
+        raise ControlError('server_hold: ожидалось {"reason": "<код причины>"}')
+    return reason.strip().upper()
+
+
+def _hold_updates(node: dict[str, Any], reason: str) -> dict[str, Any]:
+    """Новое удержание — WARNING с причиной; уже удерживаемый станок сохраняет первую причину."""
+    if node.get("hold_level"):
+        return {}
+    return {"hold_level": "WARNING", "hold_reason": reason, "resume_attempts": 0, "lockout_remaining_s": 0.0}
+
+
 # ---------------------------------------------------------------------------
 # 3.1 3D-принтер Anycubic Kobra 2 Pro
 # ---------------------------------------------------------------------------
@@ -85,9 +159,23 @@ class Printer3D(SandboxNode):
     webhook_state отстаёт от real_state на один тик — так ведёт себя
     webhook-сервис реального принтера.
 
+    Файлы печати: files — имена файлов в памяти принтера (запрос list_files —
+    с размером и оценкой времени печати); upload_file {"file_name", "content"},
+    delete_file, start_job по имени файла. Время печати и расход филамента
+    берутся из комментариев слайсера. set_speed — скорость печати 50..200 %
+    (M220), move — перемещение в относительных/абсолютных координатах
+    (только после HOME, не во время печати).
+
     Потребление: нагрев стола 350 Вт + сопла 40 Вт, поддержание ~90 + 15 Вт,
     электроника/моторы 25 Вт. Пауза дольше 10 мин — расслоение корпуса
     (error_code LAYER_ADHESION, part_defect), №6.
+
+    Удержание сервером (holds.py): server_hold {"reason"} — пауза по интерлоку или
+    кризису (hold_level, hold_reason, resume_attempts, lockout_remaining_s);
+    release_hold — снятие удержания админом. ИИ-агенту пауза и отмена недоступны
+    (политика доступа), resume проверяет причину удержания.
+    bed_clear — стол свободен; после завершения печати false, пока Оператор не
+    заберёт деталь (дверь бокса ФабЛаб или remove_part).
     """
     title = "3D-принтер Anycubic Kobra 2 Pro"
     system = "Производство"
@@ -96,6 +184,8 @@ class Printer3D(SandboxNode):
     NOZZLE_PRINT_C, BED_PRINT_C, NOZZLE_STANDBY_C = 210.0, 60.0, 170.0
     ROTATION_DISTANCE_X = 40.0  # заводская калибровка (документация)
     ADHESION_PAUSE_S = 600.0
+    TRAVEL = (220.0, 220.0, 250.0)   # область печати Kobra 2 Pro, мм
+    MAX_RELATIVE_MOVE = 50.0         # ограничение драйвера (klipper_printer.move_relative)
 
     def __init__(self, node_id: str, auto_jobs: bool = True, job_rate_per_hour: float = 0.4,
                  error_rate_per_hour: float = 0.02, seed: Optional[int] = None) -> None:
@@ -105,6 +195,11 @@ class Printer3D(SandboxNode):
         self.error_rate_per_hour = error_rate_per_hour
         self._completed_age_s = 0.0
         self._paused_s = 0.0
+        # файлы в памяти принтера: имя -> {size_bytes, estimated_time_s, filament_g}
+        self._files: dict[str, dict[str, Any]] = {
+            name: {"size_bytes": int(duration * 55), "estimated_time_s": float(duration),
+                   "filament_g": round(12.0 * duration / 3600.0, 1)}
+            for name, duration in PRINT_JOBS}
 
     def initial_state(self) -> dict[str, Any]:
         return {
@@ -120,6 +215,9 @@ class Printer3D(SandboxNode):
             "print_duration_s": 0.0,
             "print_time_left_s": 0.0,
             "homed": False,
+            "x_mm": 0.0, "y_mm": 0.0, "z_mm": 0.0,
+            "speed_pct": 100.0,            # множитель скорости печати (M220), %
+            "files": sorted(self._files),  # файлы печати в памяти принтера
             "last_gcode": None,
             "gcode_state": "OK",           # OK | ERROR
             "gcode_error": None,
@@ -135,6 +233,8 @@ class Printer3D(SandboxNode):
             "part_defect": None,           # причина брака текущей детали
             "control_powered": True,
             "control_spool_g": None,
+            **HOLD_STATE,
+            "bed_clear": True,             # стол свободен (деталь снята)
         }
 
     def _start(self, file_name: str, duration_s: float, filament_g: Optional[float] = None) -> dict[str, Any]:
@@ -163,7 +263,8 @@ class Printer3D(SandboxNode):
             return 0.0
         heated = (node["nozzle_temp_c"] >= node["nozzle_target_c"] - 5.0
                   and node["bed_temp_c"] >= node["bed_target_c"] - 3.0)
-        return node["filament_required_g"] / node["print_duration_s"] * 3600.0 if heated else 0.0
+        speed = float(node.get("speed_pct") or 100.0) / 100.0
+        return node["filament_required_g"] / node["print_duration_s"] * 3600.0 * speed if heated else 0.0
 
     def simulate(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
         ambient = self.env.indoor.temperature_c
@@ -188,12 +289,15 @@ class Printer3D(SandboxNode):
             u["online"] = True
             if state == "COMPLETED":
                 self._completed_age_s += gdt
-                if self._completed_age_s > 1800:  # деталь сняли со стола
-                    u.update(state="IDLE", file_name=None, progress_pct=0.0)
-            if (self.auto_jobs and state in ("IDLE", "COMPLETED") and 8 <= self.hour < 22
+                if self._completed_age_s > 1800 and self.auto_jobs:  # деталь сняли со стола
+                    u.update(state="IDLE", file_name=None, progress_pct=0.0, bed_clear=True)
+            if (self.auto_jobs and self._files and state in ("IDLE", "COMPLETED") and 8 <= self.hour < 22
                     and self.happens(self.job_rate_per_hour, gdt)):
-                file_name, duration = PRINT_JOBS[self.rng.randrange(len(PRINT_JOBS))]
-                u.update(self._start(file_name, duration * self.rng.uniform(0.8, 1.2)))
+                names = sorted(self._files)
+                file_name = names[self.rng.randrange(len(names))]
+                meta = self._files[file_name]
+                u.update(self._start(file_name, meta["estimated_time_s"] * self.rng.uniform(0.8, 1.2),
+                                     meta.get("filament_g")))
             elif state == "PRINTING":
                 u.update(self._advance(gdt, node))
 
@@ -239,19 +343,26 @@ class Printer3D(SandboxNode):
                       progress_pct=node["progress_pct"])
             return {"state": "PAUSED", "paused": True, "error_code": "FILAMENT_RUNOUT",
                     "nozzle_target_c": self.NOZZLE_STANDBY_C}
-        elapsed = node["print_elapsed_s"] + (gdt if heated else 0.0)
+        # print_elapsed_s — пройденная часть задания в секундах при скорости 100 %
+        step = gdt * float(node.get("speed_pct") or 100.0) / 100.0 if heated else 0.0
+        elapsed = node["print_elapsed_s"] + step
         duration = node["print_duration_s"]
-        used = node.get("filament_used_g", 0.0) + (node["filament_required_g"] * gdt / duration if heated else 0.0)
+        used = node.get("filament_used_g", 0.0) + node["filament_required_g"] * step / duration
         if elapsed >= duration:
             self._completed_age_s = 0.0
             self.emit("printer.job_done", file_name=node["file_name"], part_defect=node.get("part_defect"))
             return {"state": "COMPLETED", "progress_pct": 100.0, "print_elapsed_s": duration,
                     "print_time_left_s": 0.0, "nozzle_target_c": 0.0, "bed_target_c": 0.0,
                     "filament_used_g": round(node["filament_required_g"], 1)}
-        return {"print_elapsed_s": round(elapsed, 1),
-                "progress_pct": round(elapsed / duration * 100.0, 1),
-                "print_time_left_s": round(duration - elapsed, 0),
-                "filament_used_g": round(used, 2)}
+        u = {"print_elapsed_s": round(elapsed, 1),
+             "progress_pct": round(elapsed / duration * 100.0, 1),
+             "print_time_left_s": round(duration - elapsed, 0),
+             "filament_used_g": round(used, 2)}
+        if heated:  # сопло обходит контуры слоя, Z растёт с прогрессом
+            u.update(x_mm=round(110.0 + 40.0 * math.sin(elapsed / 7.0), 2),
+                     y_mm=round(110.0 + 40.0 * math.cos(elapsed / 11.0), 2),
+                     z_mm=round(0.2 + 30.0 * elapsed / duration, 2))
+        return u
 
     # ---- управление ----
 
@@ -286,20 +397,150 @@ class Printer3D(SandboxNode):
                 "error_code": None, "nozzle_target_c": 0.0, "bed_target_c": 0.0,
                 "filament_required_g": 0.0, "filament_used_g": 0.0, "part_defect": None}
 
+    @control("server_hold")
+    def _server_hold(self, node, value):
+        """Удержание сервером: {"reason": "IL_CO2"} — пауза + WARNING (интерлок/кризис, не агент)."""
+        reason = _hold_reason(value)
+        if node["state"] == "PRINTING":
+            return {**self._pause(node, None), **_hold_updates(node, reason)}
+        if node["state"] == "PAUSED":
+            return _hold_updates(node, reason)
+        raise ControlError(f"Удержание невозможно в состоянии {node['state']}")
+
+    @control("release_hold")
+    def _release_hold(self, node, value):
+        """Админ снимает удержание и ALARM (печать не продолжается — нужен resume)."""
+        return dict(HOLD_STATE)
+
+    @control("remove_part", physical=True)
+    def _remove_part(self, node, value):
+        """Оператор снял деталь со стола."""
+        if node["state"] in ("PRINTING", "PAUSED"):
+            raise ControlError("Идёт печать — деталь снимать нельзя")
+        return {"bed_clear": True}
+
+    def real_command(self, store: StateStore, action: str, value: Any = None) -> list[tuple[str, Any]]:
+        """Удержание, его снятие и снятие детали — состояние сервера; на Klipper уходит только pause."""
+        node = store.get_node(self.node_id)
+        if action == "server_hold":
+            reason = _hold_reason(value)
+            if node["state"] not in ("PRINTING", "PAUSED"):
+                raise ControlError(f"Удержание невозможно в состоянии {node['state']}")
+            store.update(self.node_id, **_hold_updates(node, reason))
+            return [("pause", None)] if node["state"] == "PRINTING" else []
+        if action in ("release_hold", "remove_part"):
+            store.update(self.node_id, **getattr(self, "_" + action)(node, value))
+            return []
+        return [(action, value)]
+
     @control("home")
     def _home(self, node, value):
         self._require_online(node)
         if node["state"] in ("PRINTING", "PAUSED"):
             raise ControlError("HOME недоступен во время печати")
-        return {"homed": True}
+        return {"homed": True, "x_mm": 0.0, "y_mm": 0.0, "z_mm": 0.0}
 
-    @control("start_job", "start_print")
+    @control("start_job", "start_print", "print_file")
     def _start_job(self, node, value):
+        """value: имя файла из files (или {"file_name": ...})."""
         self._require_online(node)
         if node["state"] not in ("IDLE", "COMPLETED"):
             raise ControlError(f"Принтер занят (состояние {node['state']})")
-        file_name, duration = _job_from_value(value, 2 * 3600.0)
-        return self._start(file_name, duration, _filament_from_value(value, duration))
+        file_name, duration, meta = _job_file(self._files, value, 2 * 3600.0, "start_job")
+        if meta is not None and not (isinstance(value, dict) and value.get("filament_g") is not None):
+            filament = meta["filament_g"]
+        else:
+            filament = _filament_from_value(value, duration)
+        return self._start(file_name, duration, filament)
+
+    @control("upload_file", "upload")
+    def _upload_file(self, node, value):
+        """value: {"file_name": "part.gcode", "content": "<текст G-code>"}."""
+        self._require_online(node)
+        if not isinstance(value, dict):
+            raise ControlError('upload_file: ожидалось {"file_name": ..., "content": "<G-code>"}')
+        name = file_name_from_value(value, PRINTER_EXTENSIONS, "upload_file")
+        content = value.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ControlError("upload_file: content — непустой текст G-code")
+        size = len(content.encode("utf-8"))
+        if size > MAX_UPLOAD_BYTES:
+            raise ControlError(f"upload_file: файл больше {MAX_UPLOAD_BYTES // (1024 * 1024)} МБ")
+        if node["state"] in ("PRINTING", "PAUSED") and node["file_name"] == name:
+            raise ControlError(f"upload_file: файл {name!r} сейчас печатается")
+        duration, filament = gcode_estimate(content)
+        if duration is None:
+            duration = max(60.0, 0.05 * content.count("\n"))   # ~20 строк G-code в секунду
+        self._files[name] = {"size_bytes": size, "estimated_time_s": round(duration, 1),
+                             "filament_g": round(filament, 2) if filament is not None
+                             else round(12.0 * duration / 3600.0, 1)}
+        self.emit("printer.file_uploaded", file_name=name, size_bytes=size)
+        return {"files": sorted(self._files)}
+
+    @control("delete_file")
+    def _delete_file(self, node, value):
+        """value: имя файла (или {"file_name": ...})."""
+        self._require_online(node)
+        name = file_name_from_value(value, PRINTER_EXTENSIONS, "delete_file")
+        if name not in self._files:
+            raise ControlError(f"delete_file: файл {name!r} не найден. Доступно: {sorted(self._files)}")
+        if node["state"] in ("PRINTING", "PAUSED") and node["file_name"] == name:
+            raise ControlError(f"delete_file: файл {name!r} сейчас печатается")
+        del self._files[name]
+        return {"files": sorted(self._files)}
+
+    @query("list_files")
+    def _list_files(self, node, params):
+        return _file_list(self._files)
+
+    @control("set_speed", "set_print_speed")
+    def _set_speed(self, node, value):
+        """value: скорость печати в процентах 50..200 (или {"pct": ...}) — M220."""
+        self._require_online(node)
+        pct = value.get("pct") if isinstance(value, dict) else value
+        return {"speed_pct": parse_number(pct, 50.0, 200.0, "Скорость печати, %")}
+
+    @staticmethod
+    def parse_move(value: Any, travel: tuple[float, float, float], max_relative: float) -> dict[str, Any]:
+        """Проверка параметров move. Возвращает {"mode", "x", "y", "z", "feedrate"}."""
+        if not isinstance(value, dict):
+            raise ControlError('move: ожидалось {"x"?, "y"?, "z"?, "mode": "relative"|"absolute", "feedrate"?}')
+        mode = str(value.get("mode", "relative")).strip().lower()
+        if mode not in ("relative", "absolute"):
+            raise ControlError('move: mode — "relative" или "absolute"')
+        move: dict[str, Any] = {"mode": mode,
+                                "feedrate": int(parse_number(value.get("feedrate", 3000), 60, 12000,
+                                                             "Скорость перемещения, мм/мин"))}
+        for axis, limit in zip("xyz", travel):
+            if value.get(axis) is None:
+                move[axis] = None
+            elif mode == "relative":
+                move[axis] = parse_number(value[axis], -max_relative, max_relative, f"Смещение {axis.upper()}, мм")
+            else:
+                move[axis] = parse_number(value[axis], 0.0, limit, f"Координата {axis.upper()}, мм")
+        if all(move[a] is None for a in "xyz"):
+            raise ControlError("move: укажите хотя бы одну ось (x, y, z)")
+        return move
+
+    @control("move", "move_axes", "jog")
+    def _move(self, node, value):
+        """value: {"x", "y", "z" (необязательные), "mode": "relative" (по умолчанию) | "absolute",
+        "feedrate": мм/мин}. Относительное смещение — не более ±50 мм по оси."""
+        self._require_online(node)
+        move = self.parse_move(value, self.TRAVEL, self.MAX_RELATIVE_MOVE)
+        if node["state"] in ("PRINTING", "PAUSED"):
+            raise ControlError("move: перемещение недоступно во время печати")
+        if not node["homed"]:
+            raise ControlError("move: сначала выполните HOME (Must home axis first)")
+        u = {}
+        for axis, limit in zip("xyz", self.TRAVEL):
+            if move[axis] is None:
+                continue
+            target = move[axis] + node[f"{axis}_mm"] if move["mode"] == "relative" else move[axis]
+            if not 0.0 <= target <= limit:
+                raise ControlError(f"move: {axis.upper()}={target:g} мм вне области печати 0..{limit:g}")
+            u[f"{axis}_mm"] = round(target, 3)
+        return u
 
     @control("send_gcode", "gcode")
     def _send_gcode(self, node, value):
@@ -318,7 +559,9 @@ class Printer3D(SandboxNode):
                 if state in ("PRINTING", "PAUSED"):
                     u.update(gcode_state="ERROR", gcode_error="G28 rejected: printer busy")
                     break
-                u["homed"] = True
+                u.update(homed=True, x_mm=0.0, y_mm=0.0, z_mm=0.0)
+            elif cmd == "M220":
+                u["speed_pct"] = clamp(params.get("S", 100.0), 1.0, 500.0)
             elif cmd in ("M104", "M109"):
                 u["nozzle_target_c"] = clamp(params.get("S", 0.0), 0.0, 260.0)
             elif cmd in ("M140", "M190"):
@@ -338,7 +581,7 @@ class Printer3D(SandboxNode):
                 state = "ERROR"
             elif cmd.startswith("G") and int(m.group(2)) in (0, 1, 90, 91, 92):
                 pass  # перемещения и режимы координат принимаются без эффекта на телеметрию
-            elif cmd in ("M105", "M114", "M115", "M106", "M107", "M84", "M18", "M220", "M221"):
+            elif cmd in ("M105", "M114", "M115", "M106", "M107", "M84", "M18", "M221"):
                 pass
             else:
                 u.update(gcode_state="ERROR", gcode_error=f"Unsupported command: {cmd}")
@@ -374,6 +617,13 @@ class CNCMill(SandboxNode):
     Без питания GRBL сбрасывается: ALARM:3, позиция потеряна (homed=False).
     FeedHold останавливает шпиндель (парковка), Resume — раскручивает снова.
     Качество: spindle_temp_c > 40 °C — DEGRADED, > 45 °C — OVERHEAT (брак, К7).
+
+    Файлы фрезеровки: files — имена G-code файлов в каталоге фрезера,
+    запрос list_files — с размером и оценкой времени; start_job — по имени файла.
+
+    Удержание сервером (holds.py): server_hold {"reason"} — FeedHold с остановкой
+    шпинделя (на реальном GRBL: «!» + Spindle Stop override 0x9E, при отказе —
+    безопасная отмена задания); release_hold — снятие удержания админом.
     """
     title = "ЧПУ-фрезер 3018 Pro"
     system = "Производство"
@@ -389,6 +639,9 @@ class CNCMill(SandboxNode):
         self.auto_jobs = auto_jobs
         self.job_rate_per_hour = job_rate_per_hour
         self.alarm_rate_per_hour = alarm_rate_per_hour
+        self._files: dict[str, dict[str, Any]] = {
+            name: {"size_bytes": int(duration * 30), "estimated_time_s": float(duration), "valid": True}
+            for name, duration in CNC_JOBS}
 
     def initial_state(self) -> dict[str, Any]:
         return {
@@ -398,6 +651,7 @@ class CNCMill(SandboxNode):
             "spindle_rpm": 0.0,
             "spindle_target_rpm": 0.0,
             "file_name": None,
+            "files": sorted(self._files),  # G-code файлы, доступные для фрезеровки
             "progress_pct": 0.0,
             "job_elapsed_s": 0.0,
             "job_duration_s": 0.0,
@@ -414,6 +668,7 @@ class CNCMill(SandboxNode):
             "part_defect": None,
             "control_powered": True,
             "control_coolant_temp_c": None,
+            **HOLD_STATE,
         }
 
     def _start(self, file_name: str, duration_s: float) -> dict[str, Any]:
@@ -508,6 +763,35 @@ class CNCMill(SandboxNode):
         spindle = self.SPINDLE_RPM if node["file_name"] else node["spindle_target_rpm"]
         return {"state": "RUNNING", "paused": False, "spindle_target_rpm": spindle}
 
+    @control("server_hold")
+    def _server_hold(self, node, value):
+        """Удержание сервером: {"reason": "IL_CONDENSATE"} — FeedHold, шпиндель остановлен."""
+        reason = _hold_reason(value)
+        if node["state"] == "RUNNING":
+            return {**self._feed_hold(node, None), **_hold_updates(node, reason)}
+        if node["state"] == "PAUSED":
+            return {"spindle_target_rpm": 0.0, **_hold_updates(node, reason)}
+        raise ControlError(f"Удержание невозможно в состоянии {node['state']}")
+
+    @control("release_hold")
+    def _release_hold(self, node, value):
+        """Админ снимает удержание и ALARM (фрезеровка не продолжается — нужен resume)."""
+        return dict(HOLD_STATE)
+
+    def real_command(self, store: StateStore, action: str, value: Any = None) -> list[tuple[str, Any]]:
+        """server_hold -> драйвер «hold» (FeedHold + остановка шпинделя); release_hold — состояние сервера."""
+        node = store.get_node(self.node_id)
+        if action == "server_hold":
+            reason = _hold_reason(value)
+            if node["state"] not in ("RUNNING", "PAUSED"):
+                raise ControlError(f"Удержание невозможно в состоянии {node['state']}")
+            store.update(self.node_id, **_hold_updates(node, reason))
+            return [("hold", None)]
+        if action == "release_hold":
+            store.update(self.node_id, **HOLD_STATE)
+            return []
+        return [(action, value)]
+
     @control("abort", "stop", "cancel_job", "soft_reset")
     def _abort(self, node, value):
         if node["state"] not in ("RUNNING", "PAUSED"):
@@ -535,7 +819,12 @@ class CNCMill(SandboxNode):
         self._require_ready(node)
         if node["state"] != "IDLE":
             raise ControlError(f"Фрезер занят (состояние {node['state']})")
-        return self._start(*_job_from_value(value, 3600.0))
+        file_name, duration, _ = _job_file(self._files, value, 3600.0, "start_job")
+        return self._start(file_name, duration)
+
+    @query("list_files")
+    def _list_files(self, node, params):
+        return _file_list(self._files)
 
     @control("send_gcode", "gcode")
     def _send_gcode(self, node, value):

@@ -65,6 +65,7 @@ class SimContext:
         self.real_pv_power_w: Optional[float] = None
         self.real_inverter_reading: dict[str, Any] = {}
         self.memory: dict[str, Any] = {}           # служебное состояние правил
+        self.guard: Any = None                     # holds.check — выставляет Simulator
         self._lock = threading.RLock()
 
     # ---------------- время ----------------
@@ -144,6 +145,17 @@ class SimContext:
             return False
         canonical = node.canonical_control(action) or action
         cmd.action = canonical
+        outcome = self.guard(self, cmd) if self.guard is not None else None
+        if outcome is not None:   # заблокированная линия, удержание станка (holds.py)
+            if outcome.error:
+                cmd.ok, cmd.error = False, outcome.error
+                if not quiet:
+                    self.log_command(cmd)
+                    raise ControlError(outcome.error)
+            elif self.is_real(node_id):
+                self.real_commands.extend((node_id, a, v) for a, v in outcome.real_actions or [])
+            self.log_command(cmd)
+            return cmd.ok
         try:
             if self.is_real(node_id):
                 for real_action, real_value in node.real_command(self.store, canonical, value):

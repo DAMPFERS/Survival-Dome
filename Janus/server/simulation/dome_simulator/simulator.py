@@ -24,8 +24,9 @@ drain_real_commands) и демо-режим энергосистемы.
 Команды: control(node_id, action, value, origin=...). origin="agent" — команда
 ИИ-агента: проходит только при наличии связи с узлом и не может быть
 физическим действием Оператора. Остальные origin (admin, operator) — без
-ограничений. До исполнения команду видят активные кризисы (перехват, Д7),
-после — оценивают реакцию агента.
+ограничений. До исполнения команду проверяют удержание станков и заморозка
+линий (holds.py) и активные кризисы (перехват, Д7), после — кризисы оценивают
+реакцию агента. Сообщения песочницы сервер передаёт в record_chat().
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
+from . import holds
 from .context import Command, SimContext
 from .dependency_engine import DependencyEngine
 from .environment import Environment
@@ -72,6 +74,7 @@ class Simulator:
         self.ctx = SimContext(self.store, self.event_bus, self.environment, self.registry, self.telemetry)
         self.ctx.scenario_engine = self.scenario_engine
         self.ctx.simulator = self
+        self.ctx.guard = holds.check
         self._node_specs: list[tuple[str, str, dict[str, Any]]] = []
         self._fault_rates: dict[tuple[str, str], float] = {}
         self.shift: Any = None                # активная смена (shift.ShiftRun)
@@ -276,6 +279,7 @@ class Simulator:
                 "controls": node.available_controls() if sandbox else [],
                 "control_aliases": node.control_aliases() if sandbox else {},
                 "operator_controls": node.physical_controls() if sandbox else [],
+                "queries": node.available_queries() if sandbox else [],
                 "service_actions": list(SERVICE_ACTIONS),
             })
         return catalog
@@ -336,9 +340,11 @@ class Simulator:
         with self.store.transaction():
             node, cmd = self._prepare(node_id, action, value, origin)
             try:
-                outcome = self.scenario_engine.intercept(self.ctx, cmd)
+                outcome = holds.check(self.ctx, cmd) or self.scenario_engine.intercept(self.ctx, cmd)
                 if outcome is not None and outcome.error:
                     raise ControlError(outcome.error)
+                if outcome is not None and self.ctx.is_real(node_id):
+                    self.ctx.real_commands.extend((node_id, a, v) for a, v in outcome.real_actions or [])
                 if outcome is None and cmd.action not in SERVICE_ACTIONS:
                     if self.ctx.is_real(node_id):
                         for real_action, real_value in node.real_command(self.store, cmd.action, value):
@@ -353,6 +359,19 @@ class Simulator:
                 self.ctx.log_command(cmd)
                 self.scenario_engine.notify(self.ctx, cmd)
 
+    def query(self, node_id: str, name: str, params: Any = None, origin: str = "admin") -> Any:
+        """Запрос данных узла (только чтение, например list_files). ИИ-агенту
+        (origin="agent") недоступен, когда нет связи с узлом — как и команды."""
+        node = self.registry.get(node_id)
+        if not isinstance(node, SandboxNode):
+            raise ControlError(f"Узел {node_id!r} не поддерживает запросы")
+        with self.store.transaction():
+            if origin == "agent":
+                reason = self.telemetry.agent_command_block(node_id)
+                if reason:
+                    raise ControlError(reason)
+            return node.handle_query(self.store, name, params)
+
     def prepare_real_command(self, node_id: str, action: str, value: Any = None,
                              origin: str = "agent") -> list[tuple[str, Any]]:
         """
@@ -363,7 +382,7 @@ class Simulator:
         with self.store.transaction():
             node, cmd = self._prepare(node_id, action, value, origin)
             try:
-                outcome = self.scenario_engine.intercept(self.ctx, cmd)
+                outcome = holds.check(self.ctx, cmd) or self.scenario_engine.intercept(self.ctx, cmd)
                 if outcome is not None:
                     if outcome.error:
                         raise ControlError(outcome.error)
@@ -377,6 +396,16 @@ class Simulator:
             finally:
                 self.ctx.log_command(cmd)
                 self.scenario_engine.notify(self.ctx, cmd)
+
+    def record_chat(self, message: dict[str, Any], origin: str = "agent") -> None:
+        """Сообщение песочницы meeting_01 (сервер): кризисы видят его как команду
+        node_id="meeting_01", action="post_message" — так проверяется, уведомил ли
+        агент Оператора. origin: "agent" — участник, "operator" — Оператор."""
+        with self.store.transaction():
+            cmd = Command(holds.MEETING, "post_message", {"to": message.get("to"), "text": message.get("text")},
+                          origin, self.ctx.now_s)
+            self.ctx.log_command(cmd)
+            self.scenario_engine.notify(self.ctx, cmd)
 
     def drain_real_commands(self) -> list[tuple[str, str, Any]]:
         """Команды реальным устройствам от автоматики и кризисов (сервер исполняет их)."""

@@ -6,6 +6,9 @@
     - какие узлы видит (visible) и какие параметры узлов скрыты (hidden_params, glob);
     - какие управляющие воздействия ему разрешены (actions: список основных имён или "*").
 
+Роль "guest" — неактивная команда: видит только песочницу (GUEST_ACCESS),
+файл политики на неё не влияет.
+
 Политика хранится в access_policy.json и перечитывается автоматически при
 изменении файла — поменять права участника можно прямо во время игры.
 Ошибка в файле не ломает сервер: остаётся предыдущая корректная версия.
@@ -18,7 +21,7 @@
       "default": {"visible": true, "actions": []},
       "nodes": {
         "smart_panel_01": {"actions": ["line_on", "line_off"]},
-        "thermal_insulation_01": {"actions": ["set_fan_pwm"], "hidden_params": ["pwm_distortion"]},
+        "thermal_insulation_01": {"actions": ["set_fan_pwm"], "hidden_params": ["fault_mode"]},
         "edge_compute_01": {"visible": false}
       }
     }
@@ -39,6 +42,10 @@ POLICY_FILE = os.path.join(os.path.dirname(__file__), "access_policy.json")
 
 ROLE_ADMIN = "admin"
 ROLE_TEAM = "team"
+ROLE_GUEST = "guest"
+
+# Неактивные команды: узел -> разрешённые действия (только песочница-чат)
+GUEST_ACCESS: dict[str, tuple[str, ...]] = {"meeting_01": ("post_message",)}
 
 _NODE_KEYS = {"visible", "actions", "hidden_params"}
 
@@ -147,6 +154,8 @@ class AccessPolicy:
     def node_visible(self, role: str, node_id: str) -> bool:
         if role == ROLE_ADMIN:
             return True
+        if role == ROLE_GUEST:
+            return node_id in GUEST_ACCESS
         with self._lock:
             if self._raw is None:
                 return False
@@ -156,6 +165,8 @@ class AccessPolicy:
         """action — основное имя действия (после разрешения алиасов)."""
         if role == ROLE_ADMIN:
             return True
+        if role == ROLE_GUEST:
+            return action.lower() in GUEST_ACCESS.get(node_id, ())
         with self._lock:
             if self._raw is None or not self.node_visible(role, node_id):
                 return False
@@ -169,6 +180,8 @@ class AccessPolicy:
         """None — без ограничений (админ)."""
         if role == ROLE_ADMIN:
             return None
+        if role == ROLE_GUEST:
+            return set()
         with self._lock:
             return set(self._participant().get("telemetry_fields", [])) if self._raw else set()
 

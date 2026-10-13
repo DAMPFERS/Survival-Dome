@@ -1,5 +1,5 @@
 {
-  "_comment": "Права участника (роль team). Админ видит и может всё. Файл перечитывается автоматически. actions — основные имена действий (алиасы разрешаются сервером), \"*\" — все действия узла (служебное reconnect разрешено всегда); visible:false — узел скрыт; hidden_params — glob-шаблоны скрытых параметров.",
+  "_comment": "Права участника (роль team). Принтер и фрезер: пауза, отмена и G-code — только сервер (удержание, holds.py); resume проходит, когда причина удержания устранена. Админ видит и может всё. Файл перечитывается автоматически. actions — основные имена действий (алиасы разрешаются сервером), \"*\" — все действия узла (служебное reconnect разрешено всегда); visible:false — узел скрыт; hidden_params — glob-шаблоны скрытых параметров.",
   "participant": {
     "telemetry_fields": ["game_time"],
     "hidden_params": ["control_*", "control_override_source"],
@@ -12,8 +12,8 @@
       "dizel_1": {"actions": ["turn_on", "turn_off", "preheat"]},
       "fuel_tank_01": {"actions": ["transfer_fuel"]},
       "smart_panel_01": {"actions": ["line_on", "line_off", "reset_line_error", "reset_protection"]},
-      "printer_3d_01": {"actions": ["pause", "resume", "abort", "home", "send_gcode"]},
-      "cnc_01": {"actions": ["feed_hold", "resume", "abort", "home", "reset_alarm", "send_gcode"]},
+      "printer_3d_01": {"actions": ["resume", "home", "start_job", "upload_file", "delete_file", "set_speed", "move"]},
+      "cnc_01": {"actions": ["resume", "home", "start_job"]},
       "climate_sensor_01": {"actions": []},
       "air_quality_sensor_01": {"actions": []},
       "smoke_detector_01": {"actions": ["reset_alarm"]},
@@ -39,7 +39,9 @@
       "edge_compute_01": {"actions": ["restart_service", "limit_load", "reboot", "sync_time"]},
       "network_link_01": {"actions": []},
       "dome_automation_01": {"actions": ["set_data_trust", "block_interlock", "unblock_interlock", "reset_interlock", "acknowledge", "set_primary_sensor", "set_ventilation_auto", "set_diesel_autostart"]},
-      "thermal_insulation_01": {"actions": ["set_fan_pwm", "set_poll_interval"], "hidden_params": ["random_rpm_mode", "pwm_distortion"]}
+      "thermal_insulation_01": {"actions": ["set_fan_pwm", "set_lock", "set_vacuum", "set_poll_interval"], "hidden_params": ["fault_mode", "fault_fan"]},
+      "thermal_insulation_02": {"actions": ["set_fan_pwm", "set_relay_fan_level", "set_lock"]},
+      "meeting_01": {"actions": ["post_message"]}
     }
   }
 }

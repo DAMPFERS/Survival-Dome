@@ -15,6 +15,7 @@ SandboxNode берёт на себя всё, что одинаково у все
     simulate(gdt, node) -> dict  — генерация данных за шаг gdt (игровые секунды);
                                    node — копия текущего состояния, вернуть обновления;
     @control("имя", "алиас") def ...(self, node, value) -> dict | None.
+    @query("имя") def ...(self, node, params) -> данные (только чтение, необязательно).
 
 Скрытое физическое состояние, которого нет в телеметрии (фаза шумового
 процесса, «истинный» износ и т.п.), хранится в атрибутах инстанса.
@@ -57,6 +58,16 @@ def control(*names: str, physical: bool = False) -> Callable[[Callable], Callabl
     return decorator
 
 
+def query(*names: str) -> Callable[[Callable], Callable]:
+    """Помечает метод узла как запрос данных (только чтение, состояние не меняет).
+    Метод: (self, node, params) -> результат (JSON-совместимый). Используется для
+    данных, которые не нужны в каждой телеметрии (например, список файлов с размерами)."""
+    def decorator(fn: Callable) -> Callable:
+        fn._query_names = tuple(n.lower() for n in names)
+        return fn
+    return decorator
+
+
 class SandboxNode(BaseNode):
     title: str = ""          # человекочитаемое название из реестра
     system: str = ""         # «Энергетика», «Климат», ...
@@ -64,18 +75,23 @@ class SandboxNode(BaseNode):
     _controls: dict[str, str] = {}             # любое имя (включая алиасы) -> метод
     _control_aliases: dict[str, list[str]] = {}  # основное имя -> алиасы
     _physical: frozenset = frozenset()           # основные имена физических действий Оператора
+    _queries: dict[str, str] = {}                # имя запроса -> метод
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         controls: dict[str, str] = {}
         methods: dict[str, tuple[str, ...]] = {}
         physical: dict[str, bool] = {}
+        queries: dict[str, str] = {}
         for klass in reversed(cls.__mro__):
             for attr, fn in vars(klass).items():
                 names = getattr(fn, "_control_names", ())
                 if names:
                     methods[attr] = names  # переопределение в подклассе заменяет набор имён
                     physical[attr] = getattr(fn, "_control_physical", False)
+                for name in getattr(fn, "_query_names", ()):
+                    queries[name] = attr
+        cls._queries = queries
         for attr, names in methods.items():
             for name in names:
                 controls[name] = attr
@@ -167,6 +183,18 @@ class SandboxNode(BaseNode):
     def physical_controls(cls) -> list[str]:
         """Действия, которые выполняет Оператор руками (агенту недоступны)."""
         return sorted(cls._physical)
+
+    @classmethod
+    def available_queries(cls) -> list[str]:
+        return sorted(cls._queries)
+
+    def handle_query(self, store: StateStore, name: str, params: Any = None) -> Any:
+        """Выполняет запрос данных узла. Бросает ControlError, если запроса нет."""
+        method_name = self._queries.get(name.strip().lower())
+        if method_name is None:
+            raise ControlError(f"Узел {self.node_id!r} ({self.code_name}) не поддерживает запрос {name!r}. "
+                               f"Доступно: {self.available_queries()}")
+        return getattr(self, method_name)(store.get_node(self.node_id), params)
 
     def real_command(self, store: StateStore, action: str, value: Any = None) -> list[tuple[str, Any]]:
         """Перевод команды для узла в режиме real в команды реального драйвера.

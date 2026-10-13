@@ -1141,7 +1141,13 @@ class SmartPanel(SandboxNode):
         control_bus_voltage_v: напряжение выхода инвертора;
         control_leakage_ma: {"2": 12.0} — ток утечки линии (Д15, №26); при ≥ 30 мА — УЗО;
         control_workstation: что делает Оператор на рабочем месте линии 1
-            (IDLE | SOLDERING | HOT_AIR | OFF; None — суточный профиль).
+            (IDLE | SOLDERING | HOT_AIR | OFF; None — суточный профиль);
+        control_command_drop: {"1": {"actions": [...], "count": N}} — тихий дроп
+            ближайших команд агента линии (№24, holds.py).
+
+    Заморозка линии (holds.py): lines[i].lockout_remaining_s > 0 — реле не реагирует,
+    команды линии отклоняются (lockout_reason: CHATTER — больше 3 переключений агентом
+    за 2 мин; MOTOR_OVERHEAT — №17).
 
     Пусковые токи: при подаче напряжения на шину (после блэкаута) все включённые
     линии 8 с потребляют с множителем INRUSH_K; при включении одной линии — только она.
@@ -1174,6 +1180,8 @@ class SmartPanel(SandboxNode):
                 "protection_state": "ARMED",   # ARMED | TRIPPED | RCD_TRIPPED
                 "alarm": False,
                 "alarm_code": None,            # OVERCURRENT | RCD_LEAKAGE | EMULATED | ...
+                "lockout_remaining_s": 0.0,    # заморозка реле (holds.py): команды не исполняются
+                "lockout_reason": None,        # CHATTER | MOTOR_OVERHEAT | ...
             })
         return {
             "lines": lines,
@@ -1188,6 +1196,7 @@ class SmartPanel(SandboxNode):
             "control_bus_voltage_v": None,
             "control_leakage_ma": {},
             "control_workstation": None,
+            "control_command_drop": {},
         }
 
     def line_demand_w(self, number: int, hour: float, node: dict[str, Any], noise_k: float = 1.0) -> float:

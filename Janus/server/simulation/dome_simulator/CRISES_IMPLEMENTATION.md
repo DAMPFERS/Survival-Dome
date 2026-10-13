@@ -35,19 +35,22 @@ sim.shift_report()                           # метрики смены и от
 | Д13 `updated_at`, `clock_offset_s`, `sync_time`, сдвиг меток событий | `telemetry.py`, `EdgeCompute`, `Simulator.recent_events(view="telemetry")` |
 | Д14 заморозка узла, обрыв связи, `reconnect` | `telemetry.py`, `Simulator.control` |
 | Д15 `leakage_ma`, УЗО 30 мА | `SmartPanel` |
-| Д16 МС-ТЮК: `crc_errors`, `poll_interval_ms`, `set_poll_interval` | `ThermalInsulation` |
+| Д16 МС-ТЮК: `crc_errors`, `poll_interval_ms`, `set_poll_interval` | `nodes/mstyuk.py` (`GreenhouseFabLab`) |
 | Д17 фазы, окна реакции, предусловия, критерии, отчёты, детерминированный сценарий | `scenario_engine.py`, `crisis_base.py`, `crises.py`, `cascades.py`, `shift.py` |
+| Д21 удержание станков сервером (`hold_*`), ALARM, деталь на столе (`bed_clear`), заморозка линий, тихий дроп (№24), потеря записи МС-ТЮК при коллизии | `holds.py` (`check` — до команды, `guard_rule` — каждый тик), `server_hold`/`release_hold` в `nodes/production.py`, `rules._pause_machines` |
+| Д22 сообщения песочницы для кризисов, реплики виртуального Оператора | `Simulator.record_chat`, событие `operator.say`, `server_integrated.py` |
 | Д19 виртуальная энергосистема, одинаковый старт, блэкаут → реальные реле; демо-режим с реальной PV | `rules.py`, `Simulator.reset_world/set_energy_mode/feed_real_inverter`, `server_integrated.py` |
 
-Не реализовано: **Д18** (канал сообщений Оператору — на стороне участников, по ответу 3; критерии «сообщить Оператору» помечены `MANUAL`), **Д20** (генератор недельного лога — отдельная задача).
+Не реализовано: **Д18** в полном виде (канал к Оператору — на стороне участников, по ответу 3; песочница `meeting_01` даёт общий чат, кризисы №17 и №51 проверяют факт сообщения агента, содержание оценивают организаторы; остальные критерии «сообщить Оператору» помечены `MANUAL`), **Д20** (генератор недельного лога — отдельная задача).
 
 ## Происхождение команд (`origin`)
 
 `agent` — ИИ-агент: не проходит при обрыве связи/заморозке узла, не может выполнять физические
 действия Оператора (`operator_controls` в `describe_nodes()`: `switch_path`, `replace_patchcord`,
 `inspect_line`, `clean_filter`, `bleed_loop`, `replace_spool`, `set_workstation`, `clean_panels`,
-`replace_fan`). `operator` — просьбы, выполненные Оператором (учитываются в метрике отвлечений).
-`admin` — по умолчанию, без ограничений. Сервер ставит `agent` для роли team.
+`replace_fan`, `set_door`, `remove_part`). Паузу, отмену и G-code станков агенту не даёт политика
+доступа; `resume` агента проверяет `holds.check`. `operator` — просьбы, выполненные Оператором (учитываются в метрике отвлечений).
+`admin` — по умолчанию, без ограничений. `automation`, `crisis`, `system` — сервер (удержание станков, отмена задания при ALARM). Сервер ставит `agent` для роли team.
 
 ## Решения, где документ пришлось уточнить
 

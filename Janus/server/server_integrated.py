@@ -4,8 +4,10 @@ WebSocket-сервер купола: симулятор + реальное об�
 
 Протокол (JSON-сообщения):
     1. Первое сообщение клиента — {"type": "auth", "key": "<ключ>"}.
-       Ответ: {"type": "auth_response", "success": true, "role": "admin"|"team", "team": N}.
-       Без авторизации за AUTH_TIMEOUT секунд или с неверным ключом соединение закрывается (4401).
+       Ответ: {"type": "auth_response", "success": true, "role": "admin"|"team"|"guest", "team": N}.
+       "team" — ключ активной команды; "guest" — ключ неактивной команды: доступна
+       только песочница (meeting_01). Без авторизации за AUTH_TIMEOUT секунд или
+       с неверным ключом соединение закрывается (4401).
     2. Далее сервер каждые TELEMETRY_INTERVAL секунд шлёт {"type": "telemetry", ...}.
        Состав зависит от роли: админ получает всё, участник — только разрешённое
        политикой доступа (authorization/access_policy.json).
@@ -13,10 +15,32 @@ WebSocket-сервер купола: симулятор + реальное об�
        Ответ: {"type": "<тип>_response", "request_id": "...", "success": ..., ...}.
 
 Типы запросов:
-    все роли:  control, describe_nodes, ping
+    все роли:  control, query, describe_nodes, ping
     только админ: switch_mode, trigger_crisis, stop_crisis, list_crises, start_shift,
                   shift_report, time_control, set_active_team, get_policy,
                   set_participant_access, reload_policy
+
+query — чтение данных узла, которых нет в телеметрии:
+    {"type": "query", "node_id": "printer_3d_01", "query": "list_files", "params": {...}}
+    -> {"type": "query_response", "success": true, "result": ...}
+    Список запросов узла — поле "queries" в describe_nodes.
+
+Песочница meeting_01 — общий чат агентов всех команд и Оператора (meeting/meeting_room.py):
+    control post_message, value = "текст" | {"text", "name"?: имя агента, "to"?: адресат};
+    query read_messages, params = {"since_id"?, "limit"?}; админ — control clear.
+    Новое сообщение сразу рассылается всем, кто видит песочницу:
+    {"type": "meeting_message", "message": {...}}; в телеметрии узла — последние сообщения.
+    Отправителя (роль, команда) проставляет сервер. Кризисы связи на чат не влияют.
+    Сообщения активной команды и Оператора видят кризисы (simulator.record_chat):
+    часть кризисов требует уведомить Оператора. Реплики виртуального Оператора
+    сценария смены (события operator.say: задания, просьбы) сервер публикует в песочнице
+    от имени {"role": "operator", "name": "Оператор"}.
+
+Станки (dome_crises.md, п. 3.8): паузу и отмену задания ставит только сервер
+(интерлок или кризис) — поля hold_level / hold_reason / resume_attempts /
+lockout_remaining_s в телеметрии принтера и фрезера. resume агента проходит, только
+если причина устранена; третья пустая попытка — ALARM на 20 минут (принтер: задание
+отменено). Линии щитка могут быть заморожены (lines[i].lockout_remaining_s).
 
 Телеметрия участника — то, что видит ИИ-агент (dome_crises.md): подмены
 показаний, заморозки узлов, обрывы связи. Админ дополнительно получает
@@ -42,6 +66,13 @@ WebSocket-сервер купола: симулятор + реальное об�
                               стартом; показания реального инвертора пишутся для админа;
     demo                   — виртуальная энергосистема, но генерация PV — реальная;
     real                   — инвертор и АКБ берут данные с железа (как раньше).
+
+Время купола (задаётся при запуске, на ходу не меняется):
+    DOME_TIME_MODE=hybrid (по умолчанию) — игровые сутки 3 ч: несколько прогонов смены за день;
+    DOME_TIME_MODE=real                  — сутки 24 ч, часы купола идут как настоящие.
+    DOME_START_HOUR — час на часах купола при запуске: число (13.5 = 13:30) или now
+    (по умолчанию hybrid — 8, real — now). Физика устройств и таймеры кризисов в обоих
+    режимах идут 1:1. В режиме real start_shift без start_hour начинает смену с текущего часа.
 """
 from __future__ import annotations
 
@@ -50,7 +81,10 @@ import itertools
 import json
 import logging
 import os
+import queue
 import sys
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Optional
@@ -62,9 +96,10 @@ SERVER_DIR = Path(__file__).parent
 sys.path.insert(0, str(SERVER_DIR / "simulation"))
 sys.path.insert(0, str(SERVER_DIR))
 
-from authorization.access_policy import ROLE_ADMIN, ROLE_TEAM, AccessPolicy, PolicyError  # noqa: E402
+from authorization.access_policy import ROLE_ADMIN, ROLE_GUEST, ROLE_TEAM, AccessPolicy, PolicyError  # noqa: E402
 from authorization.protector import Protector  # noqa: E402
 from dome_simulator import ControlError, create_dome_simulator  # noqa: E402
+from meeting.meeting_room import NODE_ID as MEETING_NODE, MeetingError, MeetingRoom  # noqa: E402
 from real_devices import RealCommandError, build_adapters  # noqa: E402
 
 # ================= НАСТРОЙКА ЛОГИРОВАНИЯ =================
@@ -82,9 +117,20 @@ TELEMETRY_INTERVAL = float(os.getenv("DOME_TELEMETRY_INTERVAL", "2.0"))
 REAL_SYNC_INTERVAL = float(os.getenv("DOME_REAL_SYNC_INTERVAL", "1.0"))
 AUTH_TIMEOUT = float(os.getenv("DOME_AUTH_TIMEOUT", "10.0"))
 REAL_COMMAND_TIMEOUT = float(os.getenv("DOME_REAL_COMMAND_TIMEOUT", "10.0"))
+REAL_UPLOAD_TIMEOUT = float(os.getenv("DOME_REAL_UPLOAD_TIMEOUT", "60.0"))   # загрузка файла на принтер
+MAX_MESSAGE = int(os.getenv("DOME_MAX_MESSAGE", str(32 * 1024 * 1024)))     # байт; G-code в upload_file
+MEETING_FILE = os.getenv("DOME_MEETING_FILE", str(SERVER_DIR / "meeting" / "history.jsonl"))
+MEETING_RATE = (10, 10.0)   # не больше 10 сообщений песочницы за 10 с с одной сессии
 ACTIVE_TEAM = int(os.getenv("DOME_ACTIVE_TEAM", "1"))           # 1..4
 AUTO_REAL = os.getenv("DOME_AUTO_REAL", "1") not in ("0", "false", "False", "")
 ENERGY_MODE = os.getenv("DOME_ENERGY_MODE", "virtual").strip().lower()   # virtual | demo | real
+# Время купола: hybrid — игровые сутки 3 ч (несколько прогонов смены за день),
+# real — сутки 24 ч, часы купола идут как настоящие. Физика устройств в обоих режимах 1:1.
+TIME_MODE = os.getenv("DOME_TIME_MODE", "hybrid").strip().lower()       # hybrid | real
+DAY_LENGTH_S = {"hybrid": 3 * 3600.0, "real": 24 * 3600.0}
+# Час на часах купола при запуске: число (13.5 = 13:30) или "now" — текущее местное время.
+# По умолчанию: hybrid — 8:00, real — now.
+START_HOUR = os.getenv("DOME_START_HOUR", "").strip().lower()
 ENERGY_NODES = ("solar_inverter_01", "battery_01")
 KEYS_CONFIG = os.getenv("DOME_KEYS_CONFIG", str(SERVER_DIR / "authorization" / "keys_config.json"))
 POLICY_FILE = os.getenv("DOME_POLICY_FILE", str(SERVER_DIR / "authorization" / "access_policy.json"))
@@ -109,13 +155,14 @@ class Session:
     team: Optional[int]
     id: int
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    posts: deque = field(default_factory=deque)   # время последних сообщений в песочницу
 
     async def send(self, message: dict[str, Any]) -> None:
         async with self.send_lock:
             await self.websocket.send(json.dumps(message, ensure_ascii=False, default=str))
 
     def __str__(self) -> str:
-        who = "admin" if self.role == ROLE_ADMIN else f"team{self.team}"
+        who = "admin" if self.role == ROLE_ADMIN else f"{self.role}{self.team}"
         return f"#{self.id}({who})"
 
 
@@ -128,7 +175,9 @@ class DomeServer:
         self.protector.setActiveTeamKey(ACTIVE_TEAM - 1)
         self.policy = AccessPolicy(POLICY_FILE)
 
-        self.simulator = create_dome_simulator(tick_interval=4.0, time_scale=1.0)
+        self.meeting = MeetingRoom(MEETING_FILE)
+        self.simulator = create_dome_simulator(tick_interval=4.0, time_scale=1.0,
+                                               day_length_s=DAY_LENGTH_S[TIME_MODE], start_hour=_start_hour())
         if ENERGY_MODE in ("virtual", "demo"):
             self.simulator.set_energy_mode(ENERGY_MODE)
         self.adapters = build_adapters(lambda: self.simulator.get("smart_panel_01", "lines"))
@@ -138,11 +187,17 @@ class DomeServer:
         self.sessions: set[Session] = set()
         self._session_ids = itertools.count(1)
         self._sync_task: Optional[asyncio.Task] = None
+        self._operator_task: Optional[asyncio.Task] = None
+        # реплики виртуального Оператора (поток симулятора -> цикл событий сервера)
+        self._operator_lines: queue.SimpleQueue = queue.SimpleQueue()
+        self.simulator.subscribe("operator.say", lambda event: self._operator_lines.put(dict(event.payload)))
 
+        everyone = {ROLE_ADMIN, ROLE_TEAM, ROLE_GUEST}
         self.handlers: dict[str, tuple[Handler, set[str]]] = {
-            "ping": (self.handle_ping, {ROLE_ADMIN, ROLE_TEAM}),
-            "control": (self.handle_control, {ROLE_ADMIN, ROLE_TEAM}),
-            "describe_nodes": (self.handle_describe_nodes, {ROLE_ADMIN, ROLE_TEAM}),
+            "ping": (self.handle_ping, everyone),
+            "control": (self.handle_control, everyone),
+            "query": (self.handle_query, everyone),
+            "describe_nodes": (self.handle_describe_nodes, everyone),
             "switch_mode": (self.handle_switch_mode, {ROLE_ADMIN}),
             "trigger_crisis": (self.handle_trigger_crisis, {ROLE_ADMIN}),
             "stop_crisis": (self.handle_stop_crisis, {ROLE_ADMIN}),
@@ -160,7 +215,9 @@ class DomeServer:
 
     async def start(self) -> None:
         self.simulator.start()
-        logger.info("Dome simulator started")
+        env = self.simulator.environment
+        logger.info("Dome simulator started: время %s (сутки %.0f ч), часы купола %02d:%02d", TIME_MODE,
+                    env.day_length_s / 3600, int(env.outdoor.hour), int(env.outdoor.hour % 1 * 60))
         for adapter in self.adapters.values():
             try:
                 await asyncio.to_thread(adapter.start)
@@ -169,10 +226,13 @@ class DomeServer:
         logger.info("Real device adapters: %s", ", ".join(
             f"{nid} ({a.title})" for nid, a in self.adapters.items()) or "нет")
         self._sync_task = asyncio.create_task(self._real_sync_loop())
+        self._operator_task = asyncio.create_task(self._operator_loop())
 
     async def stop(self) -> None:
         if self._sync_task:
             self._sync_task.cancel()
+        if self._operator_task:
+            self._operator_task.cancel()
         self.simulator.stop()
         for adapter in self.adapters.values():
             try:
@@ -240,10 +300,14 @@ class DomeServer:
 
     def build_telemetry(self, session: Session) -> dict[str, Any]:
         snap = self.simulator.snapshot()          # телеметрия, которую видит агент
+        nodes = {**snap["nodes"], MEETING_NODE: self.meeting.summary()}
+        if session.role == ROLE_GUEST:
+            return {"type": "telemetry", "timestamp": snap["timestamp"], "role": session.role,
+                    "data": {"nodes": self.policy.filter_nodes(session.role, nodes)}}
         env = self.simulator.environment_snapshot()
         tc = self.simulator.time_controller
         full = {
-            "nodes": snap["nodes"],
+            "nodes": nodes,
             "game_time": {"day": env["outdoor"]["day"], "hour": round(env["outdoor"]["hour"], 2)},
             "node_modes": dict(self.node_modes),
             "active_crises": self.simulator.active_crises(),
@@ -261,6 +325,7 @@ class DomeServer:
                 "crisis_reports": self.simulator.crisis_reports(),
                 "telemetry_layer": self.simulator.telemetry.describe(),
                 "energy_mode": ENERGY_MODE,
+                "time_mode": TIME_MODE,
                 "real_inverter": dict(self.simulator.ctx.real_inverter_reading),
             })
             if self.simulator.shift is not None:
@@ -287,7 +352,7 @@ class DomeServer:
         return {"success": True}
 
     def _require_node(self, session: Session, node_id: Any) -> str:
-        if not isinstance(node_id, str) or node_id not in self.simulator.node_ids() \
+        if not isinstance(node_id, str) or node_id not in (*self.simulator.node_ids(), MEETING_NODE) \
                 or not self.policy.node_visible(session.role, node_id):
             raise RequestError(f"Неизвестный узел: {node_id!r}")  # скрытый узел не выдаём
         return node_id
@@ -298,6 +363,8 @@ class DomeServer:
         if not isinstance(action, str) or not action.strip():
             raise RequestError("Не указано действие (action)")
         value = data.get("value")
+        if node_id == MEETING_NODE:
+            return await self._meeting_control(session, action, value)
         if data.get("job_name") is not None and value is None:  # совместимость со старым API
             value = {"file_name": data["job_name"]}
             if data.get("duration_s") is not None:
@@ -318,13 +385,13 @@ class DomeServer:
             except ControlError as e:
                 raise RequestError(str(e)) from None
             for real_action, real_value in real_actions:
+                timeout = REAL_UPLOAD_TIMEOUT if real_action == "upload_file" else REAL_COMMAND_TIMEOUT
                 try:
-                    await asyncio.wait_for(self.adapters[node_id].execute(real_action, real_value),
-                                           REAL_COMMAND_TIMEOUT)
+                    await asyncio.wait_for(self.adapters[node_id].execute(real_action, real_value), timeout)
                 except RealCommandError as e:
                     raise RequestError(str(e)) from None
                 except asyncio.TimeoutError:
-                    raise RequestError(f"Реальное устройство не ответило за {REAL_COMMAND_TIMEOUT:.0f} с") from None
+                    raise RequestError(f"Реальное устройство не ответило за {timeout:.0f} с") from None
             await asyncio.to_thread(self.sync_node, node_id)  # сразу показываем результат
         else:
             try:
@@ -335,8 +402,111 @@ class DomeServer:
                                        f"Разрешено: {self._allowed_controls(session, node_id)}") from None
                 raise RequestError(str(e)) from None
 
-        logger.info("%s control %s.%s(%r) [%s]", session, node_id, canonical, value, mode)
+        logger.info("%s control %s.%s(%s) [%s]", session, node_id, canonical, _short(value), mode)
         return {"success": True, "node_id": node_id, "action": action, "mode": mode}
+
+    async def handle_query(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
+        """{"node_id": ..., "query": "list_files", "params": {...}} — данные узла (только чтение)."""
+        node_id = self._require_node(session, data.get("node_id"))
+        name = data.get("query")
+        if not isinstance(name, str) or not name.strip():
+            raise RequestError("Не указан запрос (query)")
+        name, params = name.strip().lower(), data.get("params")
+        response = {"success": True, "node_id": node_id, "query": name}
+        if node_id == MEETING_NODE:
+            if name != "read_messages":
+                raise RequestError(f"Песочница не поддерживает запрос {name!r}. Доступно: ['read_messages']")
+            try:
+                return {**response, "result": self.meeting.read(params)}
+            except MeetingError as e:
+                raise RequestError(str(e)) from None
+
+        queries = next(n["queries"] for n in self.simulator.describe_nodes() if n["node_id"] == node_id)
+        if name not in queries:
+            raise RequestError(f"Узел {node_id} не поддерживает запрос {name!r}. Доступно: {queries}")
+        origin = "admin" if session.role == ROLE_ADMIN else "agent"
+        mode = self.node_modes.get(node_id, "virtual")
+        if mode == "real":
+            reason = self.simulator.telemetry.agent_command_block(node_id) if origin == "agent" else None
+            if reason:
+                raise RequestError(reason)
+            try:
+                result = await asyncio.wait_for(self.adapters[node_id].query(name, params), REAL_COMMAND_TIMEOUT)
+            except RealCommandError as e:
+                raise RequestError(str(e)) from None
+            except asyncio.TimeoutError:
+                raise RequestError(f"Реальное устройство не ответило за {REAL_COMMAND_TIMEOUT:.0f} с") from None
+        else:
+            try:
+                result = self.simulator.query(node_id, name, params, origin=origin)
+            except ControlError as e:
+                raise RequestError(str(e)) from None
+        return {**response, "result": result, "mode": mode}
+
+    # ================= ПЕСОЧНИЦА =================
+
+    @staticmethod
+    def _sender(session: Session) -> dict[str, Any]:
+        if session.role == ROLE_ADMIN:
+            return {"role": "operator", "team": None}   # админка — рабочее место Оператора купола
+        return {"role": session.role, "team": session.team}
+
+    async def _meeting_control(self, session: Session, action: str, value: Any) -> dict[str, Any]:
+        canonical = MeetingRoom.resolve_action(action)
+        if canonical is None or not self.policy.can_control(session.role, MEETING_NODE, canonical):
+            raise RequestError(f"Действие {action!r} для {MEETING_NODE} недоступно. "
+                               f"Разрешено: {self._allowed_controls(session, MEETING_NODE) or 'ничего'}")
+        if canonical == "clear":
+            removed = self.meeting.clear()
+            logger.info("%s cleared meeting history (%d messages)", session, removed)
+            self._broadcast_meeting({"type": "meeting_cleared"})
+            return {"success": True, "node_id": MEETING_NODE, "action": action, "removed": removed}
+
+        now = time.monotonic()
+        limit, window = MEETING_RATE
+        while session.posts and now - session.posts[0] > window:
+            session.posts.popleft()
+        if len(session.posts) >= limit:
+            raise RequestError(f"Слишком часто: не больше {limit} сообщений за {window:.0f} с")
+        try:
+            message = self.meeting.post(self._sender(session), value)
+        except MeetingError as e:
+            raise RequestError(str(e)) from None
+        session.posts.append(now)
+        logger.info("%s meeting #%d: %s", session, message["id"], _short(message["text"]))
+        if session.role in (ROLE_ADMIN, ROLE_TEAM):   # гости (неактивные команды) на смену не влияют
+            origin = "operator" if session.role == ROLE_ADMIN else "agent"
+            await asyncio.to_thread(self.simulator.record_chat, message, origin)
+        self._broadcast_meeting({"type": "meeting_message", "message": message})
+        return {"success": True, "node_id": MEETING_NODE, "action": action, "message": message}
+
+    async def _operator_loop(self) -> None:
+        """Публикует в песочнице реплики виртуального Оператора сценария смены."""
+        while True:
+            try:
+                while True:
+                    line = self._operator_lines.get_nowait()
+                    value = {"text": line.get("text"), "name": "Оператор", "to": line.get("to")}
+                    message = self.meeting.post({"role": "operator", "team": None}, value)
+                    logger.info("operator (сценарий) meeting #%d: %s", message["id"], _short(message["text"]))
+                    self._broadcast_meeting({"type": "meeting_message", "message": message})
+            except queue.Empty:
+                pass
+            except MeetingError as e:
+                logger.error("Реплика Оператора не опубликована: %s", e)
+            await asyncio.sleep(0.5)
+
+    def _broadcast_meeting(self, payload: dict[str, Any]) -> None:
+        for s in list(self.sessions):
+            if self.policy.node_visible(s.role, MEETING_NODE):
+                asyncio.create_task(self._send_quietly(s, payload))
+
+    @staticmethod
+    async def _send_quietly(session: Session, payload: dict[str, Any]) -> None:
+        try:
+            await session.send(payload)
+        except ConnectionClosed:
+            pass
 
     def _origin(self, session: Session, node_id: str, canonical: str) -> str:
         """Участник — ИИ-агент; админ выполняет и действия Оператора (учитываются в метриках смены)."""
@@ -346,6 +516,8 @@ class DomeServer:
         return "operator" if canonical in info.get("operator_controls", ()) else "admin"
 
     def _node_controls(self, node_id: str) -> list[str]:
+        if node_id == MEETING_NODE:
+            return MeetingRoom.describe()["controls"]
         return next(n["controls"] for n in self.simulator.describe_nodes() if n["node_id"] == node_id)
 
     def _allowed_controls(self, session: Session, node_id: str) -> list[str]:
@@ -353,7 +525,7 @@ class DomeServer:
 
     async def handle_describe_nodes(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
         nodes = []
-        for info in self.simulator.describe_nodes():
+        for info in [*self.simulator.describe_nodes(), MeetingRoom.describe()]:
             node_id = info["node_id"]
             if not self.policy.node_visible(session.role, node_id):
                 continue
@@ -417,6 +589,9 @@ class DomeServer:
         params = data.get("params") or {}
         if not isinstance(params, dict):
             raise RequestError("params: ожидался объект")
+        if TIME_MODE == "real" and "start_hour" not in params:
+            # реальное время: смена начинается с текущего часа купола, часы не перескакивают на 13:30
+            params = {**params, "start_hour": round(self.simulator.environment.outdoor.hour, 4)}
         try:
             self.simulator.start_shift(params=params)
         except (KeyError, ValueError) as e:
@@ -448,9 +623,11 @@ class DomeServer:
             self.protector.setActiveTeamKey(team - 1)
         except (TypeError, ValueError):
             raise RequestError("team: ожидался номер команды 1..4") from None
-        revoked = [s for s in self.sessions if s.role == ROLE_TEAM and s.team != team]
+        # участники прежней команды и гости новой — переподключаются с новой ролью
+        revoked = [s for s in self.sessions if (s.role == ROLE_TEAM and s.team != team)
+                   or (s.role == ROLE_GUEST and s.team == team)]
         for s in revoked:
-            asyncio.create_task(self._revoke(s, f"Активная команда сменилась на {team}"))
+            asyncio.create_task(self._revoke(s, f"Активная команда сменилась на {team} — переподключитесь"))
         logger.info("%s set active team %d (отключено сессий: %d)", session, team, len(revoked))
         return {"success": True, "team": team, "revoked_sessions": len(revoked)}
 
@@ -467,7 +644,7 @@ class DomeServer:
     async def handle_set_participant_access(self, session: Session, data: dict[str, Any]) -> dict[str, Any]:
         """{"node_id": "...", "actions": [...] | "*", "visible": bool, "hidden_params": [...]}"""
         node_id = data.get("node_id")
-        if node_id not in self.simulator.node_ids():
+        if node_id not in (*self.simulator.node_ids(), MEETING_NODE):
             raise RequestError(f"Неизвестный узел: {node_id!r}")
         changes = {k: data[k] for k in ("actions", "visible", "hidden_params") if k in data}
         if not changes:
@@ -502,9 +679,12 @@ class DomeServer:
             data = {}
 
         request_id = data.get("request_id") if isinstance(data, dict) else None
-        role = None
+        role, guest_index = None, None
         if isinstance(data, dict) and data.get("type") == "auth":
             role = self.protector.getRole(data.get("key"))
+            if role is None:   # ключ неактивной команды — доступ только к песочнице
+                guest_index = self.protector.getTeamIndex(data.get("key"))
+                role = ROLE_GUEST if guest_index is not None else None
         if role is None:
             logger.warning("Отказ в авторизации: %s", websocket.remote_address)
             await asyncio.sleep(1.0)  # замедляем перебор ключей
@@ -513,7 +693,8 @@ class DomeServer:
             await websocket.close(CLOSE_UNAUTHORIZED, "unauthorized")
             return None
 
-        team = (self.protector.getActiveTeamIndex() or 0) + 1 if role == ROLE_TEAM else None
+        team = (self.protector.getActiveTeamIndex() or 0) + 1 if role == ROLE_TEAM else (
+            guest_index + 1 if role == ROLE_GUEST else None)
         session = Session(websocket=websocket, role=role, team=team, id=next(self._session_ids))
         await session.send({"type": "auth_response", "request_id": request_id, "success": True,
                             "role": role, "team": team})
@@ -571,9 +752,36 @@ class DomeServer:
             logger.info("Client disconnected: %s", session)
 
 
+def _start_hour() -> float:
+    raw = START_HOUR or ("now" if TIME_MODE == "real" else "8")
+    if raw == "now":
+        now = time.localtime()
+        return now.tm_hour + now.tm_min / 60.0 + now.tm_sec / 3600.0
+    hour = float(raw)
+    if not 0.0 <= hour < 24.0:
+        raise ValueError(f"DOME_START_HOUR: ожидался час 0..24 или now, получено {raw!r}")
+    return hour
+
+
+def _short(value: Any, limit: int = 120) -> str:
+    """Для лога: длинные значения (G-code в upload_file, сообщения чата) обрезаются."""
+    if isinstance(value, dict) and isinstance(value.get("content"), str):
+        value = {**value, "content": f"<{len(value['content'])} символов>"}
+    text = value if isinstance(value, str) else repr(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 # ================= ЗАПУСК =================
 
 async def main() -> None:
+    if TIME_MODE not in DAY_LENGTH_S:
+        logger.error("DOME_TIME_MODE: ожидалось hybrid или real, получено %r", TIME_MODE)
+        return
+    try:
+        _start_hour()
+    except ValueError as e:
+        logger.error("%s", e)
+        return
     try:
         server = DomeServer()
     except (FileNotFoundError, ValueError) as e:
@@ -583,7 +791,7 @@ async def main() -> None:
 
     await server.start()
     try:
-        async with serve(server.handle_client, HOST, PORT, max_size=2_000_000):
+        async with serve(server.handle_client, HOST, PORT, max_size=MAX_MESSAGE):
             logger.info("WebSocket server started on ws://%s:%d (active team: %d)", HOST, PORT, ACTIVE_TEAM)
             await asyncio.Future()
     except asyncio.CancelledError:

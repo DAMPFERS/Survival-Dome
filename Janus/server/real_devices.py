@@ -13,9 +13,12 @@
 Модули оборудования импортируются по отдельности: отсутствие библиотеки
 одного устройства не отключает остальные.
 
+Запросы данных (query) — async query(name, params), например list_files.
+
 Статус: адаптеры принтера и ЧПУ написаны по коду модулей 3d-print/ и frezer/
 и ещё не проверены на реальном оборудовании. Адаптер ЧПУ проверен на эмуляторе
-GRBL с cnc_controller.py (GRBL 1.1, протокол send-response).
+GRBL с cnc_controller.py (GRBL 1.1, протокол send-response). Адаптеры теплиц
+МС-ТЮК (TYC/) проверены только на эмуляции HTTP API стендов.
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ import concurrent.futures
 import logging
 import os
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -67,8 +71,42 @@ class RealDeviceAdapter:
     async def execute(self, action: str, value: Any = None) -> None:
         raise RealCommandError(f"{self.title}: управление реальным устройством не поддерживается")
 
+    async def query(self, name: str, params: Any = None) -> Any:
+        """Запрос данных у реального устройства (например, list_files)."""
+        raise RealCommandError(f"{self.title}: запрос {name!r} реальным устройством не поддерживается")
+
     def status(self) -> dict[str, Any]:
         return {"title": self.title, "available": self.available()}
+
+
+def _num(value: Any, lo: float, hi: float, what: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise RealCommandError(f"{what}: ожидалось число, получено {value!r}") from None
+    if not lo <= number <= hi:
+        raise RealCommandError(f"{what}: значение {number:g} вне диапазона [{lo:g}, {hi:g}]")
+    return number
+
+
+def _bool(value: Any, what: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in ("1", "true", "on", "yes", "0", "false", "off", "no"):
+        return value.strip().lower() in ("1", "true", "on", "yes")
+    raise RealCommandError(f"{what}: ожидалось true/false (1/0), получено {value!r}")
+
+
+def _sim_check(fn, *args):
+    """Проверка аргументов команды теми же функциями, что и в симуляторе:
+    ControlError -> RealCommandError (сообщения для агента одинаковы в обоих режимах)."""
+    from dome_simulator import ControlError
+    try:
+        return fn(*args)
+    except ControlError as e:
+        raise RealCommandError(str(e)) from None
 
 
 # ---------------------------------------------------------------------------
@@ -312,13 +350,27 @@ KLIPPER_STATE_MAP = {
 
 
 class PrinterAdapter(RealDeviceAdapter):
+    """
+    Действия: pause, resume, abort, home, send_gcode, а также
+        start_job    value = имя файла из памяти принтера (или {"file_name": ...});
+        upload_file  value = {"file_name": ..., "content": "<текст G-code>"} —
+                     сервер пишет content во временный файл и загружает его в Moonraker;
+        delete_file  value = имя файла;
+        set_speed    value = скорость печати, % (50..200) — M220;
+        move         value = {"x"?, "y"?, "z"?, "mode": "relative"|"absolute", "feedrate"?}.
+    Запрос list_files — файлы в gcodes/ Moonraker. Список имён (files) в телеметрии
+    обновляется раз в FILES_REFRESH_S и сразу после upload/delete.
+    """
     node_id = "printer_3d_01"
     title = "3D-принтер (Klipper)"
+    FILES_REFRESH_S = 10.0
 
     def __init__(self, host: str, port: Optional[int] = None, poll_interval: float = 1.0) -> None:
         self.host, self.port, self.poll_interval = host, port, poll_interval
         self._module = _import_optional("klipper_printer", SERVER_DIR / "3d-print")
         self.printer = None
+        self._files: list[str] = []
+        self._files_at = float("-inf")
 
     def start(self) -> None:
         if self._module is None or self.printer is not None:
@@ -348,6 +400,8 @@ class PrinterAdapter(RealDeviceAdapter):
             state, error_code = "ERROR", f"KLIPPY_{s.klippy_state.upper()}"
         elif state == "ERROR":
             error_code = "PRINT_ERROR"
+        if time.monotonic() - self._files_at >= self.FILES_REFRESH_S:
+            self._refresh_files()
         return {
             "online": True,
             "state": state,
@@ -357,35 +411,112 @@ class PrinterAdapter(RealDeviceAdapter):
             "bed_temp_c": s.bed_temperature,
             "bed_target_c": s.bed_target,
             "file_name": s.filename or None,
+            "files": list(self._files),
             "progress_pct": round(s.progress * 100.0, 1),
+            "speed_pct": round(s.speed_factor * 100.0, 1),
+            "x_mm": s.position_x,
+            "y_mm": s.position_y,
+            "z_mm": s.position_z,
             "error_code": error_code,
             "gcode_error": s.error or (s.klippy_message or None),
             "webhook_state": s.klippy_state.upper(),  # состояние Klipper из объекта webhooks Moonraker
             "real_state": state,
         }
 
+    def _list_files(self) -> list[dict[str, Any]]:
+        files = self.printer.list_files() if self.printer is not None else None
+        if files is None:
+            raise RealCommandError(f"Список файлов принтера недоступен: {self.printer.get_status().error}"
+                                   if self.printer is not None else "Принтер не подключен")
+        return [{"name": f.get("path"), "size_bytes": f.get("size"), "modified": f.get("modified")}
+                for f in files if isinstance(f, dict) and f.get("path")]
+
+    def _refresh_files(self) -> None:
+        self._files_at = time.monotonic()
+        try:
+            self._files = sorted(f["name"] for f in self._list_files())
+        except RealCommandError as e:
+            logger.debug("Принтер: %s", e)
+
+    @staticmethod
+    def _file_name(value: Any, what: str) -> str:
+        from dome_simulator.nodes.production import PRINTER_EXTENSIONS, file_name_from_value
+        return _sim_check(file_name_from_value, value, PRINTER_EXTENSIONS, what)
+
+    def _upload(self, name: str, content: str) -> bool:
+        fd, tmp = tempfile.mkstemp(suffix=".gcode", prefix="dome_upload_")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+                f.write(content)
+            return self.printer.upload_file(tmp, name)
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    def _command(self, action: str, value: Any) -> tuple:
+        """(функция драйвера, аргументы...) для действия узла; проверка аргументов."""
+        from dome_simulator.nodes.production import MAX_UPLOAD_BYTES, Printer3D
+        p = self.printer
+        if action == "pause":
+            return (p.pause,)
+        if action == "resume":
+            return (p.resume,)
+        if action == "abort":
+            return (p.cancel_print,)
+        if action == "home":
+            return (p.home,)
+        if action == "send_gcode":
+            if not isinstance(value, str) or not value.strip():
+                raise RealCommandError("send_gcode: ожидалась непустая строка G-code")
+            return (p.send_gcode, value)
+        if action == "start_job":
+            name = self._file_name(value, "start_job")
+            if self._files and name not in self._files:
+                raise RealCommandError(f"start_job: файл {name!r} не найден. Доступно: {self._files}")
+            return (p.start_print, name)
+        if action == "upload_file":
+            if not isinstance(value, dict):
+                raise RealCommandError('upload_file: ожидалось {"file_name": ..., "content": "<G-code>"}')
+            name = self._file_name(value, "upload_file")
+            content = value.get("content")
+            if not isinstance(content, str) or not content.strip():
+                raise RealCommandError("upload_file: content — непустой текст G-code")
+            if len(content.encode("utf-8")) > MAX_UPLOAD_BYTES:
+                raise RealCommandError(f"upload_file: файл больше {MAX_UPLOAD_BYTES // (1024 * 1024)} МБ")
+            return (self._upload, name, content)
+        if action == "delete_file":
+            return (p.delete_file, self._file_name(value, "delete_file"))
+        if action == "set_speed":
+            pct = value.get("pct") if isinstance(value, dict) else value
+            return (p.set_print_speed, _num(pct, 50.0, 200.0, "Скорость печати, %") / 100.0)
+        if action == "move":
+            move = _sim_check(Printer3D.parse_move, value, Printer3D.TRAVEL, Printer3D.MAX_RELATIVE_MOVE)
+            if self.printer.get_status().print_state in ("printing", "paused"):
+                raise RealCommandError("move: перемещение недоступно во время печати")
+            fn = p.move_relative if move["mode"] == "relative" else p.move_absolute
+            return (fn, move["x"], move["y"], move["z"], move["feedrate"])
+        raise RealCommandError(f"Реальный принтер не поддерживает {action!r} (доступно: pause, resume, "
+                               "abort, home, send_gcode, start_job, upload_file, delete_file, set_speed, move)")
+
     async def execute(self, action: str, value: Any = None) -> None:
         p = self.printer
         if p is None:
             raise RealCommandError("Принтер не подключен")
-        if action == "pause":
-            call = (p.pause,)
-        elif action == "resume":
-            call = (p.resume,)
-        elif action == "abort":
-            call = (p.cancel_print,)
-        elif action == "home":
-            call = (p.home,)
-        elif action == "send_gcode":
-            if not isinstance(value, str) or not value.strip():
-                raise RealCommandError("send_gcode: ожидалась непустая строка G-code")
-            call = (p.send_gcode, value)
-        else:
-            raise RealCommandError(f"Реальный принтер не поддерживает {action!r} "
-                                   "(доступно: pause, resume, abort, home, send_gcode)")
+        call = self._command(action, value)
         ok = await asyncio.to_thread(*call)
         if not ok:
             raise RealCommandError(f"Принтер не выполнил {action}: {p.get_status().error}")
+        if action in ("upload_file", "delete_file"):
+            await asyncio.to_thread(self._refresh_files)
+
+    async def query(self, name: str, params: Any = None) -> Any:
+        if name != "list_files":
+            raise RealCommandError(f"Реальный принтер не поддерживает запрос {name!r} (доступно: list_files)")
+        if self.printer is None:
+            raise RealCommandError("Принтер не подключен")
+        return await asyncio.to_thread(self._list_files)
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +562,9 @@ class CNCAdapter(RealDeviceAdapter):
         start_job    value = имя файла (или {"file_name": ...}) из каталога gcode_dir —
                      произвольные пути с сервера запрещены;
         feed_hold    пауза задания (идемпотентно: без задания ничего не делает);
+        hold         удержание сервером (holds.py): feed hold, дождаться Hold:0, остановить
+                     шпиндель (Spindle Stop override 0x9E). Если шпиндель не остановился
+                     за HOLD_SPINDLE_WAIT_S — безопасная отмена задания (feed hold + reset);
         resume       продолжение задания (идемпотентно);
         abort        прервать задание (feed hold -> остановка -> soft reset, позиция сохраняется);
         home         $H;
@@ -438,6 +572,8 @@ class CNCAdapter(RealDeviceAdapter):
         send_gcode   одна строка G-code (из $-команд — только чтение: $G, $#, $I);
         probe_z      поиск нуля Z пробником; value — необязательный dict с параметрами
                      из CNC_PROBE_LIMITS.
+    Запрос list_files (params: {"validate": bool}) — G-code файлы каталога gcode_dir
+    (CNCController.list_gcode_files); имена файлов (files) есть и в телеметрии.
 
     home / reset_alarm / probe_z / send_gcode выполняются в worker-потоке контроллера
     дольше таймаута команды сервера. Поэтому execute() ждёт результат COMMAND_GRACE_S:
@@ -453,6 +589,9 @@ class CNCAdapter(RealDeviceAdapter):
     RETRY_S = 30.0
     COMMAND_GRACE_S = 2.0
     GCODE_GRACE_S = 5.0
+    FILES_REFRESH_S = 5.0
+    HOLD_WAIT_S = 5.0            # торможение до Hold:0
+    HOLD_SPINDLE_WAIT_S = 3.0    # остановка шпинделя после 0x9E
 
     def __init__(self, host: str, port: int = 8881, gcode_dir: Optional[Path] = None) -> None:
         self.host, self.port = host, port
@@ -466,6 +605,8 @@ class CNCAdapter(RealDeviceAdapter):
         self._pending = None            # Future последней фоновой команды
         self._pending_action: Optional[str] = None
         self._acked_error: Optional[str] = None   # ошибка контроллера, «погашенная» успешной командой
+        self._files: list[str] = []
+        self._files_at = float("-inf")
 
     # ---------------- жизненный цикл ----------------
 
@@ -495,7 +636,7 @@ class CNCAdapter(RealDeviceAdapter):
                     old.stop()
                 except Exception:
                     pass
-            cnc = self._module.CNCController(ip=self.host, port=self.port)
+            cnc = self._module.CNCController(ip=self.host, port=self.port, gcode_dir=self.gcode_dir)
             try:
                 cnc.start()
             except Exception as e:
@@ -564,6 +705,13 @@ class CNCAdapter(RealDeviceAdapter):
             return {"online": False, "error_text": s.error}
         state, error_code = self._node_state(s)
         error = s.error if s.error != self._acked_error else None
+        if time.monotonic() - self._files_at >= self.FILES_REFRESH_S:
+            self._files_at = time.monotonic()
+            try:
+                self._files = sorted(f.name for f in cnc.list_gcode_files(self.gcode_dir))
+            except OSError as e:
+                logger.debug("Фрезер: каталог G-code недоступен: %s", e)
+                self._files = []
         return {
             "online": True,
             "state": state,
@@ -574,6 +722,7 @@ class CNCAdapter(RealDeviceAdapter):
             "z_mm": round(s.z, 3) if s.z is not None else None,
             "spindle_rpm": s.spindle_rpm,   # из отчёта FS; spindle_on обновляется только по $G
             "file_name": Path(s.current_file).name if s.current_file else None,
+            "files": list(self._files),
             "progress_pct": round(s.progress, 1),
             "error_code": error_code,
             "error_text": error,
@@ -654,9 +803,42 @@ class CNCAdapter(RealDeviceAdapter):
         except concurrent.futures.TimeoutError:
             logger.info("Фрезер: %s принята, выполняется", action)
 
+    @staticmethod
+    def _wait(c, pred, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                c.refresh_status(timeout=0.5)
+            except Exception:  # noqa: BLE001 — нет свежего отчёта, ждём дальше
+                pass
+            if pred(c.get_state()):
+                return True
+            time.sleep(0.2)
+        return False
+
+    def _hold(self, c) -> None:
+        """Пауза со стопом шпинделя; если GRBL не умеет — отмена задания (позиция сохраняется)."""
+        if not c.get_state().milling:
+            raise RealCommandError("Нет выполняемого задания")
+        c.pause()
+        if not self._wait(c, lambda s: s.machine_state == "Hold:0", self.HOLD_WAIT_S):
+            logger.warning("Фрезер: не дошёл до Hold:0 за %.0f с", self.HOLD_WAIT_S)
+        c.spindle_stop()
+
+        def stopped(s) -> bool:
+            if s.accessories is not None:
+                return not any(ch in s.accessories for ch in "SC")
+            return s.spindle_rpm <= 0.0
+
+        if not self._wait(c, stopped, self.HOLD_SPINDLE_WAIT_S):
+            logger.warning("Фрезер: шпиндель не остановился на паузе — задание отменяется")
+            c.abort_milling()
+
     def _execute_sync(self, c, action: str, value: Any) -> None:
         if action == "feed_hold":
             c.pause()
+        elif action == "hold":
+            self._hold(c)
         elif action == "resume":
             c.resume()
         elif action == "abort":
@@ -688,7 +870,7 @@ class CNCAdapter(RealDeviceAdapter):
             self._submit(action, lambda: c.send_command(line), self.GCODE_GRACE_S)
             return
         else:
-            raise RealCommandError(f"Реальный фрезер не поддерживает {action!r} (доступно: feed_hold, "
+            raise RealCommandError(f"Реальный фрезер не поддерживает {action!r} (доступно: feed_hold, hold, "
                                    "resume, abort, home, reset_alarm, start_job, send_gcode, probe_z)")
         self._acked_error = c.get_state().error
 
@@ -702,6 +884,209 @@ class CNCAdapter(RealDeviceAdapter):
             raise
         except Exception as e:  # CNCBusyError, CNCAlarmError, CNCGrblError, CNCProbeError, ...
             raise RealCommandError(f"Фрезер: {e}") from None
+
+    def _list_files(self, cnc, validate: bool) -> list[dict[str, Any]]:
+        try:
+            files = cnc.list_gcode_files(self.gcode_dir, validate=validate)
+        except OSError as e:
+            raise RealCommandError(f"Каталог G-code фрезера недоступен: {e}") from None
+        self._files, self._files_at = sorted(f.name for f in files), time.monotonic()
+        return [{"name": f.name, "size_bytes": f.size, "modified": f.mtime, "valid": f.valid, "error": f.error}
+                for f in files]
+
+    async def query(self, name: str, params: Any = None) -> Any:
+        if name != "list_files":
+            raise RealCommandError(f"Реальный фрезер не поддерживает запрос {name!r} (доступно: list_files)")
+        c = self.cnc
+        if c is None:
+            raise RealCommandError("Фрезер не подключен")
+        validate = _bool(params.get("validate", False), "validate") if isinstance(params, dict) else False
+        return await asyncio.to_thread(self._list_files, c, validate)
+
+# ---------------------------------------------------------------------------
+# МС-ТЮК: теплицы ФабЛаб и Химлаб (HTTP API стендов, клиенты TYC/)
+# ---------------------------------------------------------------------------
+
+class _GreenhouseAdapter(RealDeviceAdapter):
+    """Общая часть адаптеров теплиц: клиент TYC опрашивает стенд в своём потоке,
+    read() собирает телеметрию узла из кэша клиента, команды — HTTP POST в потоке.
+    Невалидные показания (valid=false) приходят в телеметрию как null."""
+    module_name = ""
+    client_class = ""
+    FANS = 2
+    DOORS = 2
+
+    def __init__(self, base_url: str, poll_interval: float = 3.0, timeout: float = 5.0) -> None:
+        self.base_url, self.poll_interval, self.timeout = base_url, poll_interval, timeout
+        self._module = _import_optional(self.module_name, SERVER_DIR)
+        self.client = None
+
+    def start(self) -> None:
+        if self._module is None or self.client is not None:
+            return
+        self.client = getattr(self._module, self.client_class)(
+            base_url=self.base_url, poll_interval=self.poll_interval, timeout=self.timeout)
+        self.client.start()
+        logger.info("%s: опрос %s запущен", self.title, self.base_url)
+
+    def stop(self) -> None:
+        if self.client is not None:
+            self.client.stop()
+            self.client = None
+
+    def available(self) -> bool:
+        return self.client is not None and self.client.is_connected()
+
+    def _v(self, param: str, idx: Optional[int] = None) -> Any:
+        data = self.client.get(param, idx)
+        return data.value if data is not None and data.valid else None
+
+    def _list(self, param: str, count: int, conv=lambda v: v) -> list[Any]:
+        return [None if (v := self._v(param, i)) is None else conv(v) for i in range(count)]
+
+    @staticmethod
+    def _adc(value: Any) -> tuple[Optional[int], Optional[float]]:
+        """ADC и напряжение аналогового датчика: {"adc", "voltage_v" | "voltage_mv"} или число ADC."""
+        if isinstance(value, dict):
+            adc, volts = value.get("adc"), value.get("voltage_v")
+            if volts is None and value.get("voltage_mv") is not None:
+                volts = float(value["voltage_mv"]) / 1000.0
+        else:
+            adc, volts = value, None
+        if adc is None:
+            return None, None
+        adc = int(adc)
+        return adc, round(float(volts), 3) if volts is not None else round(adc / 1023 * 5.0, 3)
+
+    @staticmethod
+    def _door(closed: Any) -> Optional[str]:
+        return None if closed is None else ("CLOSED" if closed else "OPEN")
+
+    @staticmethod
+    def _lock(enabled: Any) -> Optional[str]:
+        return None if enabled is None else ("LOCKED" if enabled else "UNLOCKED")
+
+    def _common(self) -> dict[str, Any]:
+        return {
+            "online": True,
+            "fans_pwm": self._list("pwm", self.FANS, int),
+            "fans_rpm": self._list("rpm", self.FANS, int),
+            "doors": [self._door(v) for v in self._list("door", self.DOORS)],
+        }
+
+    def read(self) -> Optional[dict[str, Any]]:
+        if self.client is None:
+            return None
+        if not self.client.is_connected():
+            return {"online": False}
+        return self._read()
+
+    def _read(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def _fan_pwm(self, value: Any) -> tuple[int, int]:
+        if not isinstance(value, dict):
+            raise RealCommandError(f'set_fan_pwm: ожидалось {{"fan": 0..{self.FANS - 1}, "pwm": 0..255}}')
+        return (int(_num(value.get("fan"), 0, self.FANS - 1, "Индекс вентилятора")),
+                int(_num(value.get("pwm"), 0, 255, "PWM")))
+
+    def _command(self, action: str, value: Any) -> tuple:
+        raise NotImplementedError
+
+    async def execute(self, action: str, value: Any = None) -> None:
+        if self.client is None or not self.client.is_connected():
+            raise RealCommandError(f"{self.title}: стенд недоступен")
+        if action == "set_door":
+            raise RealCommandError("Двери стенда открывает Оператор руками — состояние видно по концевикам")
+        call = self._command(action, value)
+        if not await asyncio.to_thread(*call):
+            raise RealCommandError(f"{self.title}: стенд не выполнил {action}")
+
+
+class FabLabGreenhouseAdapter(_GreenhouseAdapter):
+    node_id = "thermal_insulation_01"
+    title = "Теплица ФабЛаб (МС-ТЮК)"
+    module_name = "TYC.fablab_client"
+    client_class = "FabLabClient"
+    FANS = 6
+
+    def _read(self) -> dict[str, Any]:
+        dust_adc, dust_v = self._adc(self._v("dust"))
+        mode = self._v("mode")
+        if isinstance(mode, dict):
+            mode = mode.get("mode")
+        vacuum = self._v("vacuum")
+        updates = {
+            **self._common(),
+            "temperature_c": self._list("temp", 3, float),
+            "pressure_pa": self._list("pressure", 3, float),
+            "humidity_pct": self._list("humidity", 3, float),
+            "voc_index": self._list("voc", 2, int),
+            "dust_adc": dust_adc,
+            "dust_voltage_v": dust_v,
+            "locks": [self._lock(v) for v in self._list("lock", self.DOORS)],
+            "vacuum_on": None if vacuum is None else bool(vacuum),
+        }
+        if isinstance(mode, int):
+            updates["fault_mode"] = mode
+        return updates
+
+    def _command(self, action: str, value: Any) -> tuple:
+        c = self.client
+        if action == "set_fan_pwm":
+            return (c.set_pwm, *self._fan_pwm(value))
+        if action == "set_lock":
+            if not isinstance(value, dict):
+                raise RealCommandError('set_lock: ожидалось {"lock": 0..1, "locked": true|false}')
+            idx = int(_num(value.get("lock"), 0, self.DOORS - 1, "Индекс замка"))
+            return (c.set_door_lock, idx, _bool(value.get("locked", True), "locked"))
+        if action == "set_vacuum":
+            mode = value.get("mode") if isinstance(value, dict) else value
+            return (c.set_vacuum, 1 if _bool(mode, "set_vacuum") else 0)
+        if action == "set_fault_mode":
+            if not isinstance(value, dict):
+                raise RealCommandError('set_fault_mode: ожидалось {"mode": 0..2, "fan": 0..5}')
+            return (c.set_mode, int(_num(value.get("mode"), 0, 2, "Режим неисправности")),
+                    int(_num(value.get("fan", 0), 0, self.FANS - 1, "Индекс вентилятора")))
+        raise RealCommandError(f"Теплица ФабЛаб не поддерживает {action!r} "
+                               "(доступно: set_fan_pwm, set_lock, set_vacuum, set_fault_mode, set_poll_interval)")
+
+
+class ChemLabGreenhouseAdapter(_GreenhouseAdapter):
+    node_id = "thermal_insulation_02"
+    title = "Теплица Химлаб (МС-ТЮК)"
+    module_name = "TYC.chem_reactor_client"
+    client_class = "ChemReactorClient"
+    FANS = 2
+    RELAY_LEVELS = 10
+
+    def _read(self) -> dict[str, Any]:
+        gas = [self._adc(v) if v is not None else (None, None) for v in self._list("gas", 2)]
+        level = self._v("relay_level")
+        return {
+            **self._common(),
+            "temperature_c": self._list("temp", 2, float),
+            "pressure_pa": self._list("pressure", 2, float),
+            "humidity_pct": self._list("humidity", 2, float),
+            "gas_adc": [g[0] for g in gas],
+            "gas_voltage_v": [g[1] for g in gas],
+            "lock": self._lock(self._v("lock_state")),
+            "relay_fan_level": None if level is None else int(level),
+        }
+
+    def _command(self, action: str, value: Any) -> tuple:
+        c = self.client
+        if action == "set_fan_pwm":
+            return (c.set_pwm, *self._fan_pwm(value))
+        if action == "set_relay_fan_level":
+            level = value.get("level") if isinstance(value, dict) else value
+            return (c.set_relay_level, int(_num(level, 0, self.RELAY_LEVELS, "Уровень релейного вентилятора")))
+        if action == "set_lock":
+            locked = value.get("locked") if isinstance(value, dict) else value
+            return (c.set_door_lock, _bool(locked, "set_lock"))
+        raise RealCommandError(f"Теплица Химлаб не поддерживает {action!r} "
+                               "(доступно: set_fan_pwm, set_relay_fan_level, set_lock)")
+
 
 # ---------------------------------------------------------------------------
 # Сборка
@@ -721,7 +1106,8 @@ def build_adapters(current_lines) -> dict[str, RealDeviceAdapter]:
     """
     current_lines — callable, возвращающий список lines щитка из симулятора.
     DOME_REAL_DEVICES ограничивает набор реальных устройств (none — только симулятор).
-    Хосты принтера и фрезера — PRINTER_HOST / CNC_HOST; пустое значение отключает устройство.
+    Хосты принтера и фрезера — PRINTER_HOST / CNC_HOST, адреса теплиц МС-ТЮК —
+    FABLAB_URL / CHEMLAB_URL; пустое значение отключает устройство.
     """
     enabled = _enabled_nodes()
     if enabled is not None and not enabled:
@@ -750,5 +1136,13 @@ def build_adapters(current_lines) -> dict[str, RealDeviceAdapter]:
         gcode_dir = os.getenv("CNC_GCODE_DIR", "").strip()
         adapters.append(CNCAdapter(cnc_host, int(os.getenv("CNC_PORT", "8881")),
                                    Path(gcode_dir) if gcode_dir else None))
+
+    fablab_url = os.getenv("FABLAB_URL", "http://127.0.0.1:8000").strip()
+    if fablab_url and wanted("thermal_insulation_01"):
+        adapters.append(FabLabGreenhouseAdapter(fablab_url))
+
+    chemlab_url = os.getenv("CHEMLAB_URL", "http://127.0.0.1:8001").strip()
+    if chemlab_url and wanted("thermal_insulation_02"):
+        adapters.append(ChemLabGreenhouseAdapter(chemlab_url))
 
     return {a.node_id: a for a in adapters if wanted(a.node_id)}

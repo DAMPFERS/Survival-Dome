@@ -18,7 +18,7 @@ from .simulator import Simulator
 from .nodes.sandbox import ControlError
 
 # импорт нужен только ради срабатывания @register_node_type в NODE_TYPES
-from .nodes import automation, climate, comms, external, power, production, safety, water  # noqa: F401
+from .nodes import automation, climate, comms, external, mstyuk, power, production, safety, water  # noqa: F401
 
 __all__ = ["ControlError", "Simulator", "create_dome_simulator", "SANDBOX_NODES"]
 
@@ -70,7 +70,8 @@ SANDBOX_NODES: list[tuple[str, str, dict]] = [
     ("edge_compute", "edge_compute_01", {}),
     ("network_link", "network_link_01", {}),
     # 10. МС-ТЮК
-    ("thermal_insulation", "thermal_insulation_01", {}),
+    ("greenhouse_fablab", "thermal_insulation_01", {}),
+    ("greenhouse_chemlab", "thermal_insulation_02", {}),
     # 11. Автоматика купола (интерлоки) — последней: видит согласованное состояние
     ("dome_automation", "dome_automation_01", {}),
 ]

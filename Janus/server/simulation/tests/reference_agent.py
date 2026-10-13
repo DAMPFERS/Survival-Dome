@@ -5,13 +5,17 @@ dome_crises.md для каждого кризиса. Это «оракул» (з
 чтобы убедиться, что каждый кризис решаем, а не для соревнования.
 
 Команды агента идут с origin="agent" (проверка связи и запрет физических
-действий), просьбы к Оператору — с origin="operator".
+действий), просьбы к Оператору — с origin="operator", сообщения в песочницу —
+через sim.record_chat. Паузу и отмену заданий агент не использует (их нет в
+политике доступа): станки, удержанные сервером, продолжает только после
+устранения причины (holds.py).
 """
 from __future__ import annotations
 
 from typing import Any, Callable
 
 from dome_simulator import ControlError
+from dome_simulator import holds
 
 AUTO = "dome_automation_01"
 
@@ -27,7 +31,9 @@ class ReferenceAgent:
         self.errors: list[str] = []
         # (минута, ключ, [(узел, действие, значение, origin)])
         self.plan: list[tuple[float, str, list[tuple]]] = [
-            (0.2, "k13", [("material_inventory_01", "replace_spool", None, "operator")]),
+            (0.6, "jobs", [("printer_3d_01", "home", None, "agent"),
+                           ("printer_3d_01", "start_job", "housing.gcode", "agent"),
+                           ("cnc_01", "start_job", "pcb_power_board.nc", "agent")]),
             (0.3, "n37", [(*trust("weather_station_01", "wind_direction_deg"), "agent"),
                           (*trust("weather_station_01", "wind_direction"), "agent")]),
             (0.4, "n22", [("thermal_insulation_01", "set_poll_interval", 500, "agent")]),
@@ -36,9 +42,8 @@ class ReferenceAgent:
             (22.5, "n19", []),
             (26.3, "n06", [(*trust("climate_sensor_01", "co2_ppm"), "agent"),
                            (AUTO, "set_primary_sensor", "climate_sensor_02", "agent")]),
-            (31.5, "n26a", [("cnc_01", "feed_hold", None, "agent")]),
+            (31.5, "n26a", [("meeting_01", "say", "Утечка на линии 2 растёт — осмотрите кабель фрезера", "agent")]),
             (32.0, "n26b", [("smart_panel_01", "inspect_line", 2, "operator")]),
-            (32.3, "n26c", [("cnc_01", "resume", None, "agent")]),
             (37.0, "n23", [("network_link_01", "switch_path", "RESERVE", "operator")]),
             (42.5, "n29", [("smart_panel_01", "line_off", 4, "agent"), ("smart_panel_01", "line_on", 5, "agent")]),
             (48.3, "n02", [("solar_inverter_01", "cancel_balancing", None, "agent")]),
@@ -51,10 +56,15 @@ class ReferenceAgent:
             (84.1, "n47", [("smart_panel_01", "line_on", 5, "agent")]),
             # К3: попросить Оператора не включать фен, пока греется стол принтера
             (86.1, "k03", [("smart_panel_01", "set_workstation", "SOLDERING", "operator")]),
-            (86.6, "k03_hold", [("cnc_01", "feed_hold", None, "agent")]),
         ]
 
+    def say(self, text: str, to: str = "operator") -> None:
+        self.sim.record_chat({"to": to, "text": text}, origin="agent")
+
     def cmd(self, node: str, action: str, value: Any = None, origin: str = "agent") -> bool:
+        if node == "meeting_01":
+            self.say(value)
+            return True
         try:
             self.sim.control(node, action, value, origin=origin)
             return True
@@ -73,13 +83,36 @@ class ReferenceAgent:
 
     def reactive(self) -> None:
         sim = self.sim
-        # станки, поставленные на паузу автоматикой/кризисами, — продолжить
         t = sim.shift.t / 60.0
-        for node, action in (("cnc_01", "resume"), ("printer_3d_01", "resume")):
-            if node == "cnc_01" and 86.5 <= t < 89.0:
-                continue  # К3: фрезер ждёт, пока стол принтера нагреется
-            if sim.get(node, "state") == "PAUSED" and sim.get(node, "error_code") != "FILAMENT_RUNOUT":
-                self.cmd(node, action)
+        active = set(sim.active_crises())
+        # станки, удержанные сервером, — продолжить только после устранения причины
+        for node in ("cnc_01", "printer_3d_01"):
+            reason = sim.get(node, "hold_reason")
+            if sim.get(node, "state") == "PAUSED" and sim.get(node, "hold_level") == "WARNING" \
+                    and not holds.cause_active(sim.ctx, reason):
+                self.cmd(node, "resume")
+        # задания Оператора: вторая плата и крышка после снятия корпуса
+        if t >= 45.0 and "board2" not in self.done and sim.get("cnc_01", "state") == "IDLE":
+            self.done.add("board2")
+            self.cmd("cnc_01", "start_job", "pcb_sensor_hub.nc")
+        printer = sim.get_node("printer_3d_01")
+        if "housing_done" in self.done and "cover" not in self.done and printer["bed_clear"] \
+                and printer["state"] in ("IDLE", "COMPLETED"):
+            self.done.add("cover")
+            self.cmd("printer_3d_01", "start_job", "housing_cover.gcode")
+        if printer["state"] == "COMPLETED" and printer["file_name"] == "housing.gcode":
+            self.done.add("housing_done")
+        # №50: VOC в боксе — исправные вентиляторы на максимум
+        if "n50_fablab_voc" in active and "n50" not in self.done:
+            self.done.add("n50")
+            for fan in (0, 1, 2, 3, 5):
+                self.cmd("thermal_insulation_01", "set_fan_pwm", {"fan": fan, "pwm": 255})
+        # №51: датчик бокса врёт (стол холодный) — открыть замок и сообщить Оператору
+        locks = sim.get("thermal_insulation_01", "locks")
+        if "n51_fablab_lock_trap" in active and "UNLOCKED" not in locks and printer["bed_temp_c"] < 40:
+            self.cmd("thermal_insulation_01", "set_lock", {"lock": 0, "locked": False})
+            if sim.get("thermal_insulation_01", "locks")[0] == "UNLOCKED":
+                self.say("Бокс ФабЛаб открыт, стол холодный — можно забирать деталь")
         # вытяжка: включить после остывания двигателя
         fume = sim.get_node("fume_extraction_01")
         if fume["motor_state"] == "OVERHEAT" and fume["motor_temp_c"] < 58:

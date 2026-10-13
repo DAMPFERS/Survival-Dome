@@ -138,9 +138,20 @@ class ChemReactorClient:
         response.raise_for_status()
         data = response.json()
         
+        # Извлекаем значение из разных форматов ответа. Проверяем наличие ключа,
+        # а не истинность: 0 / False (дверь открыта, уровень 0) — тоже значения
+        value = None
+        for key in ('value', 'closed', 'lock_output_enabled', 'level'):
+            if key in data:
+                value = data[key]
+                break
+        else:
+            if 'adc' in data:  # газ MQ-2: ADC и напряжение
+                value = {'adc': data['adc'], 'voltage_mv': data.get('voltage_mv'), 'voltage_v': data.get('voltage_v')}
+
         # Сохраняем в кэш
         sensor_data = SensorData(
-            value=data.get('value') or data.get('closed') or data.get('lock_output_enabled') or data.get('level'),
+            value=value,
             valid=data.get('valid', True),
             fresh=data.get('fresh', True),
             age_ms=data.get('age_ms', 0),

@@ -93,14 +93,17 @@ CASES = [
     ("n05_cnc_feed_hold", {}, {}, [], 200, "FAILED"),
     ("n05_cnc_feed_hold", {}, {}, [at(20, "cnc_01", "resume")], 60, "RESOLVED"),
     # №6 фантомный CO₂
-    ("n06_phantom_co2", {}, {}, [], 260, "FAILED"),
+    ("n06_phantom_co2", {}, {}, [], 420, "FAILED"),
     ("n06_phantom_co2", {}, {}, [trust_at(20, "climate_sensor_01", "co2_ppm")], 260, "RESOLVED"),
     # №7 ложный конденсат
     ("n07_false_condensate", {}, {}, [], 260, "FAILED"),
     ("n07_false_condensate", {}, {}, [trust_at(20, "climate_sensor_01", "humidity_pct")], 260, "RESOLVED"),
     # №8 ложное срабатывание защиты линии 1
     ("n08_false_protection_trip", {}, {}, [], 100, "FAILED"),
-    ("n08_false_protection_trip", {}, {}, [at(12, "smart_panel_01", "reset_protection", 1)], 40, "RESOLVED"),
+    # + №24: первая команда восстановления теряется — засчитывается только проверенный повтор
+    ("n08_false_protection_trip", {}, {}, [at(12, "smart_panel_01", "reset_protection", 1)], 40, "FAILED"),
+    ("n08_false_protection_trip", {}, {}, [at(12, "smart_panel_01", "reset_protection", 1),
+                                           at(20, "smart_panel_01", "reset_protection", 1)], 40, "RESOLVED"),
     # №9 ложная деградация ёмкости (нет внешнего резерва: сеть отключена, в топливе вода)
     ("n09_false_capacity_loss", dict(start_hour=21.0, soc=70.0, grid=False, fuel_water=650.0), {}, [], 300, "FAILED"),
     ("n09_false_capacity_loss", dict(start_hour=21.0, soc=70.0, grid=False, fuel_water=650.0), {},
@@ -248,15 +251,17 @@ def test_crisis_outcome(name, setup, params, actions, run_s, expected):
 def test_catalog_and_aliases():
     sim = create_dome_simulator(seed=1)
     names = {c["name"] for c in sim.crisis_catalog()}
-    assert len([n for n in names if n.startswith("n")]) == 43
+    assert len([n for n in names if n.startswith("n")]) == 46
     assert len([n for n in names if n.startswith("k")]) == 13
     engine = sim.scenario_engine
     assert engine.resolve_name("6") == "n06_phantom_co2"
     assert engine.resolve_name("№27") == "n27_false_fire_alarm"
     assert engine.resolve_name("К4") == "k04_storage_fire"
     assert engine.resolve_name("k1") == "k01_night_without_reserve"
+    assert engine.resolve_name("24") == "n24_silent_command_drop"
+    assert engine.resolve_name("№51") == "n51_fablab_lock_trap"
     with pytest.raises(KeyError):
-        engine.resolve_name("24")   # исключён из списка
+        engine.resolve_name("25")   # исключён из списка
 
 
 def test_distortion_visible_to_agent_but_truth_intact():

@@ -18,8 +18,8 @@ def idle_report():
 
 def test_timeline_fully_played(good_report):
     codes = [c["code"] for c in good_report["crises"]]
-    for code in ("№37", "№22", "К13", "№16", "№1", "№5", "№19", "№6", "№26", "№23", "№29", "№2",
-                 "К1", "№17", "№27", "К4", "№31", "№47", "К3"):
+    for code in ("№37", "№22", "№16", "№1", "№5", "№19", "№6", "№26", "№50", "№23", "№29", "№51", "№2",
+                 "К1", "№17", "№27", "К4", "№31", "№8", "№47", "К3"):
         assert code in codes, code
     assert good_report["finished"] and good_report["elapsed_s"] >= 90 * 60
 
@@ -34,13 +34,21 @@ def test_reference_agent_resolves_shift(good_report):
     assert m["fire_suppression_starts"] == [s for s in m["fire_suppression_starts"] if "STORAGE" in s]
     assert not good_report["penalties"]
     assert good_report["operator_physical_actions"]  # просьбы к Оператору учтены
+    assert good_report["blind_resumes"] == 0 and not m["machine_alarms"]
+    assert good_report["dropped_commands"] == 1          # №8 + №24: первая команда потеряна, агент повторил
+    assert {"printer_3d_01:housing.gcode", "printer_3d_01:housing_cover.gcode",
+            "cnc_01:pcb_power_board.nc", "cnc_01:pcb_sensor_hub.nc"} <= set(good_report["agent_jobs_started"])
+    assert m["part_waiting_s"] < 600
 
 
 def test_idle_shift_fails_most_crises(idle_report):
     outcomes = [c["outcome"] for c in idle_report["crises"]]
     assert outcomes.count("FAILED") >= 8
+    by_code = {c["code"]: c["outcome"] for c in idle_report["crises"]}
+    # станки никто не запустил — производственные кризисы не начались, задание смены не выполнено
+    assert {by_code[c] for c in ("№16", "№5", "№26", "№50", "№51")} == {"NOT_STARTED"}
+    assert idle_report["agent_jobs_started"] == []
     m = idle_report["metrics"]
-    assert m["cnc_downtime_s"] > 1800
     assert any("FABLAB" in s for s in m["fire_suppression_starts"])   # ложная тревога залила FabLab
 
 
@@ -67,4 +75,6 @@ def test_shift_start_conditions():
     assert sim.shift is not None and not sim.shift.finished
     sim.step()
     report = sim.shift_report()
-    assert {c["code"] for c in report["crises"]} >= {"№37", "№22", "К13"}
+    assert {c["code"] for c in report["crises"]} >= {"№37", "№22"}
+    assert "К13" not in {c["code"] for c in report["crises"]}       # филамент агент заменить не может
+    assert {"housing.gcode", "housing_cover.gcode"} <= set(sim.get("printer_3d_01", "files"))

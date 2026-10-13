@@ -547,6 +547,55 @@ class KlipperPrinter:
 
         return self._send_gcode_async(full_command)
 
+    # Область печати Anycubic Kobra 2 Pro, мм
+    TRAVEL_LIMITS = {"x": 220.0, "y": 220.0, "z": 250.0}
+
+    def move_absolute(
+        self,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        z: Optional[float] = None,
+        feedrate: int = 3000,
+    ) -> bool:
+        """
+        Перемещение в абсолютные координаты.
+
+        Args:
+            x, y, z: Целевые координаты в мм (в пределах TRAVEL_LIMITS)
+            feedrate: Скорость движения в мм/мин (по умолчанию 3000)
+
+        Returns:
+            True при успехе, False при ошибке
+
+        Примечание: Klipper отклонит перемещение, если оси не захомлены.
+        """
+
+        status = self.get_status()
+        if status.printing:
+            self._set_error("Нельзя перемещать оси во время печати")
+            return False
+
+        target = {"x": x, "y": y, "z": z}
+        if all(v is None for v in target.values()):
+            self._set_error("Необходимо указать хотя бы одну ось для перемещения")
+            return False
+
+        move_cmd = "G1"
+        for axis, value in target.items():
+            if value is None:
+                continue
+            limit = self.TRAVEL_LIMITS[axis]
+            if not 0.0 <= value <= limit:
+                self._set_error(
+                    f"Координата {axis.upper()} ({value}мм) вне области печати 0..{limit}мм"
+                )
+                return False
+            move_cmd += f" {axis.upper()}{value:.3f}"
+        move_cmd += f" F{feedrate}"
+
+        # Явно включаем абсолютный режим: принтер мог остаться в G91
+        return self._send_gcode_async("G90\n" + move_cmd)
+
     def get_position(self) -> Optional[Dict[str, float]]:
         """
         Получить текущую позицию toolhead.

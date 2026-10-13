@@ -128,6 +128,17 @@ class Protector:
             return "team"
         return None
 
+    def getTeamIndex(self, inputKey: str) -> Optional[int]:
+        """Индекс команды (0-3) по её ключу — любой, не только активной; None — не командный ключ."""
+        if not isinstance(inputKey, str) or not inputKey:
+            return None
+        inputHash = self._hashKey(inputKey)
+        found = None
+        for index, teamHash in enumerate(self.teamHashes):
+            if hmac.compare_digest(inputHash, teamHash):  # без раннего выхода — время не зависит от индекса
+                found = index
+        return found
+
 
 # Пример использования
 if __name__ == "__main__":

@@ -22,13 +22,15 @@
                  перепад на фильтре → нагрузка насоса; пожаротушение ← вода резервуара;
                  пожаротушение в FABLAB → вода на линии 1 (УЗО)
     автоматика   интерлоки ПЛК по телеметрии (nodes/automation.py), вентиляция по CO₂,
-                 автозапуск дизеля
+                 автозапуск дизеля; паузу станков ставит удержание сервера (holds.py)
+    удержание    таймеры ALARM станков и заморозки линий, деталь на столе принтера (holds.guard_rule)
 """
 from __future__ import annotations
 
 import math
 from typing import Any, Callable, Optional
 
+from . import holds
 from .context import SimContext
 from .environment import clamp
 from .events import Severity
@@ -334,12 +336,13 @@ def _line_off(ctx: SimContext, n: int, shed: list[int]) -> None:
         shed.append(n)
 
 
-def _pause_machines(ctx: SimContext, paused: list[str]) -> None:
+def _pause_machines(ctx: SimContext, paused: list[str], reason: str) -> None:
+    """Удержание станков сервером (holds.py): пауза + WARNING с причиной reason."""
     if ctx.has(PRINTER) and ctx.get(PRINTER, "state") == "PRINTING":
-        if ctx.command(PRINTER, "pause", origin="automation"):
+        if holds.impose(ctx, PRINTER, reason):
             paused.append(PRINTER)
     if ctx.has(CNC) and ctx.get(CNC, "state") == "RUNNING":
-        if ctx.command(CNC, "feed_hold", origin="automation"):
+        if holds.impose(ctx, CNC, reason):
             paused.append(CNC)
 
 
@@ -408,7 +411,7 @@ def automation_rule(ctx: SimContext, dt: float) -> None:
     co2 = r.number(primary, "co2_ppm")
     if step("IL_CO2", co2 is not None and co2 > 2000.0, INTERLOCKS["IL_CO2"]["delay_s"]):
         paused: list[str] = []
-        _pause_machines(ctx, paused)
+        _pause_machines(ctx, paused, "IL_CO2")
         st = ils["IL_CO2"]
         if ctx.has(VENT):
             vent = ctx.node(VENT)
@@ -427,7 +430,7 @@ def automation_rule(ctx: SimContext, dt: float) -> None:
     condensate = (rh is not None and rh > 90.0) or (t is not None and dew is not None and t - dew < 1.0)
     if step("IL_CONDENSATE", condensate, INTERLOCKS["IL_CONDENSATE"]["delay_s"]):
         paused = []
-        if ctx.has(CNC) and ctx.get(CNC, "state") == "RUNNING" and ctx.command(CNC, "feed_hold", origin="automation"):
+        if ctx.has(CNC) and ctx.get(CNC, "state") == "RUNNING" and holds.impose(ctx, CNC, "IL_CONDENSATE"):
             paused.append(CNC)
         ils["IL_CONDENSATE"]["paused"] = paused
         trip_event("IL_CONDENSATE", f"Риск конденсата (RH {rh}): ЧПУ на паузе", paused=paused)
@@ -447,7 +450,7 @@ def automation_rule(ctx: SimContext, dt: float) -> None:
                 continue
             paused, shed = [], []
             if zone == "FABLAB":
-                _pause_machines(ctx, paused)
+                _pause_machines(ctx, paused, "IL_SMOKE")
                 _line_off(ctx, 1, shed)
             entry = trip_event("IL_SMOKE", f"Дым в зоне {zone}: через 60 с без квитирования — пожаротушение",
                                zone=zone)
@@ -668,4 +671,5 @@ def build_default_rules() -> list[tuple[str, RuleFunc]]:
         ("air", air_rule),
         ("water", water_rule),
         ("automation", automation_rule),
+        ("holds", holds.guard_rule),
     ]
