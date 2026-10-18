@@ -9,12 +9,12 @@ CAMERAS = {
     },
     1: {
         "name": "Camera 2",
-        "rtsp": "rtsp://admin:password@192.168.8.66:554/Streaming/Channels/101",
+        "rtsp": "rtsp://admin:!Dezmant2805@192.168.8.103:554/Streaming/Channels/101",
         "enabled": True,
     },
     2: {
         "name": "Camera 3",
-        "rtsp": "rtsp://admin:password@192.168.8.67:554/Streaming/Channels/101",
+        "rtsp": "rtsp://admin:!Dezmant2805@192.168.8.105:554/Streaming/Channels/101",
         "enabled": True,
     },
 }
