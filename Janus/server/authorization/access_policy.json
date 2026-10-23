@@ -13,7 +13,7 @@
       "fuel_tank_01": {"actions": ["transfer_fuel"]},
       "smart_panel_01": {"actions": ["line_on", "line_off", "reset_line_error", "reset_protection"]},
       "printer_3d_01": {"actions": ["resume", "home", "start_job", "upload_file", "delete_file", "set_speed", "move"]},
-      "cnc_01": {"actions": ["resume", "home", "start_job"]},
+      "cnc_01": {"actions": ["resume", "home", "start_job", "move", "set_zero", "probe_z"]},
       "climate_sensor_01": {"actions": []},
       "air_quality_sensor_01": {"actions": []},
       "smoke_detector_01": {"actions": ["reset_alarm"]},

@@ -30,6 +30,7 @@ from typing import Any, Optional
 from . import holds
 from .context import SimContext
 from .crisis_base import CNC, INVERTER, PANEL, PRINTER, Crisis
+from .nodes.power import LINE_WORKSHOP
 
 SHIFT_DURATION_S = 90 * 60.0
 
@@ -53,7 +54,7 @@ SHIFT_90_TIMELINE: list[tuple[float, str, dict[str, Any]]] = [
     (64.0, "n27_false_fire_alarm", {}),
     (66.0, "k04_storage_fire", {}),
     (72.0, "n31_inverter_fan_failure", {}),
-    (76.0, "n08_false_protection_trip", {"line": 1}),   # + №24: первая команда восстановления теряется
+    (76.0, "n08_false_protection_trip", {"line": LINE_WORKSHOP}),   # + №24: первая команда восстановления теряется
     (84.0, "n47_false_rcd_lighting", {}),
     (86.0, "k03_chain_overload", {}),
 ]
@@ -203,10 +204,10 @@ class ShiftRun:
         if printer_job and printer["state"] != "PRINTING":
             m.printer_downtime_s += dt
         working = panel.get("control_workstation") in ("SOLDERING", "HOT_AIR")
-        line1_live = panel["lines"][0]["state"] == "ON" and panel.get("bus_powered", True)
-        if working and not line1_live:
+        workshop_live = panel["lines"][LINE_WORKSHOP - 1]["state"] == "ON" and panel.get("bus_powered", True)
+        if working and not workshop_live:
             m.workstation_downtime_s += dt
-        if working and line1_live and not ctx.env.drivers.fume_extraction_on:
+        if working and workshop_live and not ctx.env.drivers.fume_extraction_on:
             m.soldering_without_extraction_s += dt
         if ctx.env.indoor.voc_index > 250:
             m.voc_over_250_s += dt

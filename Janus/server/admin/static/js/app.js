@@ -299,12 +299,12 @@ function activeCrisesHtml() {
 const HINTS = {
   line_on: ['1', 'номер линии 1–8'], line_off: ['8', 'номер линии 1–8'], reset_protection: ['1', 'номер линии'],
   reset_line_error: ['1', 'номер линии'], emulate_protection_trip: ['{"line": 1, "type": "RCD_TRIP"}', 'TRIPPED | RCD_TRIP'],
-  inspect_line: ['2', 'номер линии (Оператор)'], set_workstation: ['SOLDERING', 'IDLE | SOLDERING | HOT_AIR | OFF'],
+  inspect_line: ['4', 'номер линии (Оператор)'], set_workstation: ['SOLDERING', 'IDLE | SOLDERING | HOT_AIR | OFF'],
   set_mode: ['HYBRID', 'инвертор: HYBRID | GRID_ONLY | BATTERY_ONLY; вентиляция: RECIRCULATION | FRESH_AIR | MIXED'],
   set_fan: ['AUTO', 'AUTO | ON | OFF'], start_cell_balancing: ['', 'минуты (по умолчанию 45)'],
   start_job: ['{"file_name": "part.gcode", "duration_s": 3600, "filament_g": 50}', 'имя файла или объект'],
   send_gcode: ['G28', 'строка G-code'], set_speed: ['60', '%'], set_power_limit: ['60', '%'],
-  set_data_trust: ['{"node": "climate_sensor_01", "param": "co2_ppm", "trust": "UNRELIABLE"}', 'TRUSTED | UNRELIABLE | FAILED; param "voltage_v" + "line": 2'],
+  set_data_trust: ['{"node": "climate_sensor_01", "param": "co2_ppm", "trust": "UNRELIABLE"}', 'TRUSTED | UNRELIABLE | FAILED; param "voltage_v" + "line": 4'],
   block_interlock: ['{"id": "IL_SMOKE", "minutes": 10}', 'не больше 30 минут'], unblock_interlock: ['IL_SMOKE', ''],
   reset_interlock: ['IL_CO2', 'снять сработавший интерлок'], acknowledge: ['all', 'event_id или all'],
   set_primary_sensor: ['climate_sensor_02', 'climate_sensor_01..03'], set_ventilation_auto: ['true', ''],
@@ -318,6 +318,9 @@ const HINTS = {
   lockdown: ['true', ''], transfer_fuel: ['', 'литры (по умолчанию — до полного)'], set_threshold: ['0.5', 'мм/с'],
   set_thresholds: ['{"warning": 5, "alarm": 20}', ''], set_fan_pwm: ['{"fan": 0, "pwm": 200}', 'fan 0–5, pwm 0–255'],
   enable_mppt: ['2', 'номер канала (панели) / без значения (инвертор)'], disable_mppt: ['2', ''],
+  move: ['{"x": 10, "y": 0, "z": -5, "mode": "relative", "feedrate": 1000}', 'relative — смещение, absolute — рабочие координаты'],
+  set_zero: ['xy', 'оси: xyz (по умолчанию) | xy | z'],
+  probe_z: ['{"distance": 10, "plate_thickness": 0, "retract": 2}', 'distance, feed, plate_thickness, retract, second_pass_feed, latch_distance'],
 };
 
 function renderNodes() {
@@ -372,7 +375,7 @@ function updateNodeCard(id, card) {
   card.badges.innerHTML = `${badge(mode, mode === 'real' ? 'real' : 'mute')} ${status ? sb(status) : ''}
     ${real ? `<button class="small ghost" data-switch="${id}" data-mode="${mode === 'real' ? 'virtual' : 'real'}">→ ${mode === 'real' ? 'virtual' : 'real'}</button>` : ''}`;
 
-  const actions = [...(info.controls || []), ...(info.real_only_controls || [])];
+  const actions = info.controls || [];
   const key = actions.join(',') + '|' + (info.operator_controls || []).join(',');
   if (key !== card.actionsKey) {
     card.actionsKey = key;

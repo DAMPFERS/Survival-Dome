@@ -603,16 +603,39 @@ CNC_JOBS = [
 GRBL_ALARMS = {
     "ALARM:1": "Hard limit triggered",
     "ALARM:2": "Soft limit: target exceeds machine travel",
-    "ALARM:5": "Homing fail: limit switch not found",
+    "ALARM:5": "Probe fail: probe did not contact the workpiece",
 }
+
+# Пробинг Z (probe_z): параметры, которые можно передать в value, их диапазоны и значения
+# по умолчанию (как у CNCController.probe_z_zero). Общие для виртуального и реального фрезера.
+CNC_PROBE_LIMITS: dict[str, tuple[float, float]] = {
+    "distance": (0.1, 30.0),          # мм вниз от текущей точки
+    "feed": (1.0, 300.0),             # мм/мин
+    "plate_thickness": (0.0, 30.0),   # мм: рабочий Z в точке касания станет равен толщине пластины
+    "retract": (0.0, 20.0),           # мм отъезда вверх после касания
+    "second_pass_feed": (1.0, 100.0), # мм/мин повторного медленного касания
+    "latch_distance": (0.1, 5.0),     # мм отъезда перед повторным касанием
+}
+CNC_PROBE_DEFAULTS = {"distance": 10.0, "feed": 50.0, "plate_thickness": 0.0, "retract": 2.0}
+CNC_AXES = "xyz"
 
 
 @register_node_type("cnc")
 class CNCMill(SandboxNode):
     """
-    Координаты — в миллиметрах рабочей области 300×180×45.
-    Входы для правил: control_powered (линия 2 щитка), control_coolant_temp_c
+    Lunyee 3018 Pro Max, рабочая область 300×180×80 мм.
+    Входы для правил: control_powered (линия 4 щитка), control_coolant_temp_c
     (температура жидкости контура охлаждения → spindle_temp_c).
+
+    Координаты как у GRBL: x_mm/y_mm/z_mm — рабочие (WPos, в них написан G-code),
+    mpos_mm — машинные, wco_mm — смещение рабочей системы координат (WPos = MPos − WCO).
+    Машинная область модели: X 0..300, Y 0..180, Z −80..10 (Z 0 — после HOME, вниз — минус).
+    Поверхность заготовки модели — машинный Z = SURFACE_Z.
+
+    Наладка (только в IDLE): move — перемещение головы (jog GRBL: модальное состояние G90/G91
+    не меняется), set_zero — текущая точка становится нулём по выбранным осям (G10 L20 P0),
+    probe_z — поиск поверхности пробником (G38.2) и запись Z0; last_probe — результат
+    в машинных координатах. Пробник не дотянулся до поверхности — ALARM:5.
 
     Без питания GRBL сбрасывается: ALARM:3, позиция потеряна (homed=False).
     FeedHold останавливает шпиндель (парковка), Resume — раскручивает снова.
@@ -625,11 +648,14 @@ class CNCMill(SandboxNode):
     шпинделя (на реальном GRBL: «!» + Spindle Stop override 0x9E, при отказе —
     безопасная отмена задания); release_hold — снятие удержания админом.
     """
-    title = "ЧПУ-фрезер 3018 Pro"
+    title = "ЧПУ-фрезер Lunyee 3018 Pro Max"
     system = "Производство"
     category = "production"
 
-    TRAVEL = (300.0, 180.0, 45.0)
+    TRAVEL = (300.0, 180.0, 80.0)
+    MACHINE_LIMITS = ((0.0, 300.0), (0.0, 180.0), (-80.0, 10.0))
+    SURFACE_Z = -20.0               # машинный Z поверхности заготовки (модель)
+    JOG_FEED = (10.0, 5000.0)       # мм/мин; по умолчанию 1000
     SPINDLE_RPM = 10000.0
     SPINDLE_W, STEPPERS_W, IDLE_W = 250.0, 40.0, 25.0
 
@@ -648,6 +674,9 @@ class CNCMill(SandboxNode):
             "state": "IDLE",               # IDLE | RUNNING | PAUSED | ALARM
             "paused": False,
             "x_mm": 0.0, "y_mm": 0.0, "z_mm": 0.0,
+            "mpos_mm": [0.0, 0.0, 0.0],
+            "wco_mm": [0.0, 0.0, 0.0],
+            "last_probe": None,            # {"x_mm", "y_mm", "z_mm" (машинные), "success"}
             "spindle_rpm": 0.0,
             "spindle_target_rpm": 0.0,
             "file_name": None,
@@ -678,9 +707,10 @@ class CNCMill(SandboxNode):
                 "spindle_target_rpm": self.SPINDLE_RPM, "part_defect": None}
 
     def _toolpath(self, t: float) -> tuple[float, float, float]:
-        """Правдоподобная траектория фрезеровки платы: обход контуров + редкие холостые ходы."""
-        x = 150.0 + 110.0 * math.sin(2 * math.pi * t / 640.0)
-        y = 90.0 + 70.0 * math.sin(2 * math.pi * t / 410.0 + 1.1)
+        """Правдоподобная траектория фрезеровки платы ~100×70 мм в рабочих координатах (от нуля
+        заготовки): обход контуров + редкие холостые ходы."""
+        x = 50.0 + 45.0 * math.sin(2 * math.pi * t / 640.0)
+        y = 35.0 + 30.0 * math.sin(2 * math.pi * t / 410.0 + 1.1)
         z = 5.0 if (t % 300.0) < 15.0 else -1.6  # подъём на безопасную высоту
         return x, y, z
 
@@ -723,7 +753,86 @@ class CNCMill(SandboxNode):
         u["quality_state"] = quality
         if running and quality == "OVERHEAT" and not node.get("part_defect"):
             u["part_defect"] = "SPINDLE_OVERHEAT"
+        u["mpos_mm"] = self._mpos({**node, **u})
         return u
+
+    @staticmethod
+    def _mpos(node: dict[str, Any]) -> list[float]:
+        """Машинные координаты из рабочих: MPos = WPos + WCO."""
+        return [round(float(node[f"{a}_mm"]) + float(w), 3) for a, w in zip(CNC_AXES, node["wco_mm"])]
+
+    def _work(self, node: dict[str, Any], mpos: list[float]) -> dict[str, Any]:
+        """Обновления узла для машинной позиции mpos (рабочие координаты пересчитываются)."""
+        return {**{f"{a}_mm": round(m - float(w), 3) for a, m, w in zip(CNC_AXES, mpos, node["wco_mm"])},
+                "mpos_mm": [round(m, 3) for m in mpos]}
+
+    def _in_travel(self, mpos: list[float]) -> bool:
+        return all(lo <= m <= hi for m, (lo, hi) in zip(mpos, self.MACHINE_LIMITS))
+
+    def _require_idle(self, node: dict[str, Any], what: str) -> None:
+        self._require_ready(node)
+        if node["state"] != "IDLE":
+            raise ControlError(f"{what}: станок должен быть в IDLE (сейчас {node['state']})")
+
+    @classmethod
+    def parse_move(cls, value: Any) -> dict[str, Any]:
+        """move: {"x"?, "y"?, "z"?, "mode": "relative" (по умолчанию) | "absolute", "feedrate"?}.
+        Относительно — смещение от текущей точки (не больше хода оси), абсолютно — рабочие
+        координаты (от нуля, выставленного set_zero / probe_z). Возвращает {"mode", "x", "y", "z", "feedrate"}."""
+        if not isinstance(value, dict):
+            raise ControlError('move: ожидалось {"x"?, "y"?, "z"?, "mode": "relative"|"absolute", "feedrate"?}')
+        unknown = set(value) - {"x", "y", "z", "mode", "feedrate"}
+        if unknown:
+            raise ControlError(f"move: неизвестные параметры {sorted(unknown)} (доступно: x, y, z, mode, feedrate)")
+        mode = str(value.get("mode", "relative")).strip().lower()
+        if mode not in ("relative", "absolute"):
+            raise ControlError('move: mode — "relative" или "absolute"')
+        lo, hi = cls.JOG_FEED
+        move: dict[str, Any] = {"mode": mode,
+                                "feedrate": round(parse_number(value.get("feedrate", 1000.0), lo, hi,
+                                                               "Скорость перемещения, мм/мин"), 1)}
+        for axis, travel in zip(CNC_AXES, cls.TRAVEL):
+            raw = value.get(axis)
+            move[axis] = None if raw is None else round(parse_number(
+                raw, -travel, travel, f"{'Смещение' if mode == 'relative' else 'Координата'} {axis.upper()}, мм"), 3)
+        if all(move[a] is None for a in CNC_AXES):
+            raise ControlError("move: укажите хотя бы одну ось (x, y, z)")
+        return move
+
+    @staticmethod
+    def parse_axes(value: Any) -> str:
+        """set_zero: оси, которые обнулить: "xyz" (по умолчанию), "xy", "z", ["x", "y"] или {"axes": ...}."""
+        if isinstance(value, dict):
+            value = value.get("axes")
+        if value is None:
+            return CNC_AXES
+        if isinstance(value, (list, tuple)):
+            value = "".join(str(a) for a in value)
+        if not isinstance(value, str) or not value.strip():
+            raise ControlError('set_zero: оси — строка вроде "xy" или список ["x", "y"]')
+        axes = value.strip().lower()
+        if set(axes) - set(CNC_AXES) or len(set(axes)) != len(axes):
+            raise ControlError(f'set_zero: допустимы оси x, y, z без повторов, получено {value!r}')
+        return "".join(a for a in CNC_AXES if a in axes)
+
+    @staticmethod
+    def parse_probe(value: Any) -> dict[str, float]:
+        """probe_z: необязательный объект с параметрами из CNC_PROBE_LIMITS; только заданные ключи."""
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ControlError(f"probe_z: value — объект с параметрами {', '.join(CNC_PROBE_LIMITS)} "
+                               "(все необязательны)")
+        unknown = set(value) - set(CNC_PROBE_LIMITS)
+        if unknown:
+            raise ControlError(f"probe_z: неизвестные параметры {sorted(unknown)}. "
+                               f"Доступно: {', '.join(CNC_PROBE_LIMITS)}")
+        params: dict[str, float] = {}
+        for key, raw in value.items():
+            if raw is not None:
+                lo, hi = CNC_PROBE_LIMITS[key]
+                params[key] = parse_number(raw, lo, hi, f"probe_z: {key}")
+        return params
 
     def _advance(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
         if self.happens(self.alarm_rate_per_hour, gdt):
@@ -805,14 +914,69 @@ class CNCMill(SandboxNode):
         self._require_ready(node)
         if node["state"] in ("RUNNING", "PAUSED"):
             raise ControlError("Home недоступен во время обработки")
+        # машинный ноль; смещение рабочей СК (WCO) сохраняется, как в EEPROM GRBL
         return {"state": "IDLE", "alarm": False, "alarm_code": None, "homed": True,
-                "x_mm": 0.0, "y_mm": 0.0, "z_mm": 0.0}
+                **self._work(node, [0.0, 0.0, 0.0])}
 
     @control("reset_alarm", "unlock", "$x")
     def _reset_alarm(self, node, value):
         if node["state"] != "ALARM":
             raise ControlError("Фрезер не в состоянии ALARM")
         return {"state": "IDLE", "alarm": False, "alarm_code": None, "paused": False}
+
+    @control("move", "jog")
+    def _move(self, node, value):
+        """value: {"x"?, "y"?, "z"?, "mode": "relative" (по умолчанию) | "absolute", "feedrate"?: мм/мин}.
+        relative — смещение от текущей точки, absolute — рабочие координаты. Только в IDLE.
+        Цель за пределами хода станка — отказ (error:15), станок не двигается."""
+        move = self.parse_move(value)
+        self._require_idle(node, "move")
+        mpos = self._mpos(node)
+        for i, axis in enumerate(CNC_AXES):
+            if move[axis] is not None:
+                mpos[i] = mpos[i] + move[axis] if move["mode"] == "relative" \
+                    else move[axis] + float(node["wco_mm"][i])
+        if not self._in_travel(mpos):
+            raise ControlError(f"error:15 Jog target exceeds machine travel: MPos {[round(m, 3) for m in mpos]}, "
+                               f"ход X {self.MACHINE_LIMITS[0]}, Y {self.MACHINE_LIMITS[1]}, Z {self.MACHINE_LIMITS[2]}")
+        return self._work(node, mpos)
+
+    @control("set_zero", "zero")
+    def _set_zero(self, node, value):
+        """Текущая точка — ноль рабочей СК по осям value: "xyz" (по умолчанию), "xy", "z", ["x", "y"].
+        Как G10 L20 P0 X0 Y0 Z0. Только в IDLE."""
+        axes = self.parse_axes(value)
+        self._require_idle(node, "set_zero")
+        mpos = self._mpos(node)
+        wco = [round(mpos[i] if axis in axes else float(w), 3)
+               for i, (axis, w) in enumerate(zip(CNC_AXES, node["wco_mm"]))]
+        return {**self._work({**node, "wco_mm": wco}, mpos), "wco_mm": wco}
+
+    @control("probe_z")
+    def _probe_z(self, node, value):
+        """Поиск поверхности пробником (G38.2) и запись Z0: рабочий Z в точке касания = plate_thickness,
+        затем отъезд вверх на retract. value — необязательный объект: distance (ход вниз, мм),
+        feed, plate_thickness, retract, second_pass_feed, latch_distance. Только в IDLE.
+        Касания нет на всём ходе — ALARM:5 (снять: reset_alarm или home)."""
+        p = {**CNC_PROBE_DEFAULTS, **self.parse_probe(value)}
+        self._require_idle(node, "probe_z")
+        mpos = self._mpos(node)
+        contact = self.SURFACE_Z + p["plate_thickness"]     # пластина лежит на заготовке
+        if mpos[2] < contact - 1e-6:
+            raise ControlError("probe_z: пробник уже показывает контакт (Pn:P) — поднимите Z")
+        if mpos[2] - p["distance"] > contact:
+            mpos[2] -= p["distance"]
+            self.emit("cnc.alarm", Severity.WARNING, alarm_code="ALARM:5")
+            return {**self._work(node, mpos), "state": "ALARM", "alarm": True, "alarm_code": "ALARM:5",
+                    "error_text": GRBL_ALARMS["ALARM:5"],
+                    "last_probe": {"x_mm": mpos[0], "y_mm": mpos[1], "z_mm": round(mpos[2], 3), "success": False}}
+        wco = [float(w) for w in node["wco_mm"]]
+        wco[2] = round(contact - p["plate_thickness"], 3)   # рабочий Z касания = толщина пластины
+        touch = list(mpos)
+        touch[2] = contact
+        mpos[2] = min(contact + p["retract"], self.MACHINE_LIMITS[2][1])
+        return {**self._work({**node, "wco_mm": wco}, mpos), "wco_mm": wco, "error_text": None,
+                "last_probe": {"x_mm": touch[0], "y_mm": touch[1], "z_mm": round(touch[2], 3), "success": True}}
 
     @control("start_job")
     def _start_job(self, node, value):
@@ -838,6 +1002,7 @@ class CNCMill(SandboxNode):
                 handler = {"$H": self._home, "$X": self._reset_alarm, "!": self._feed_hold, "~": self._resume}[line]
                 u.update(handler({**node, **u, "state": state}, None))
                 state = u.get("state", state)
+                pos = [u.get(f"{a}_mm", node[f"{a}_mm"]) for a in CNC_AXES]
                 continue
             if state == "ALARM":
                 u.update(error_code="error:9", error_text="G-code locked out during alarm")
@@ -855,11 +1020,12 @@ class CNCMill(SandboxNode):
                 for axis, i in (("X", 0), ("Y", 1), ("Z", 2)):
                     if axis in params:
                         pos[i] = params[axis]
-                if not all(0.0 <= p <= t for p, t in zip(pos[:2], self.TRAVEL[:2])) or not -self.TRAVEL[2] <= pos[2] <= 10.0:
+                mpos = [p + float(w) for p, w in zip(pos, node["wco_mm"])]
+                if not self._in_travel(mpos):
                     self.emit("cnc.alarm", Severity.WARNING, alarm_code="ALARM:2")
                     u.update(state="ALARM", alarm=True, alarm_code="ALARM:2", spindle_target_rpm=0.0)
                     break
-                u.update(x_mm=pos[0], y_mm=pos[1], z_mm=pos[2])
+                u.update(self._work(node, mpos))
             elif cmd in ("M3", "M4"):
                 u["spindle_target_rpm"] = clamp(params.get("S", self.SPINDLE_RPM), 0.0, 12000.0)
             elif cmd == "M5":

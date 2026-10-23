@@ -29,7 +29,7 @@ if sim.get("printer_3d_01", "state") in ("PRINTING", "PAUSED", "ERROR"):
 sim.control("printer_3d_01", "start_job", {"file_name": "bracket_v2.gcode", "duration_s": 3600})
 
 # Управление линией умного щитка
-sim.control("smart_panel_01", "line_off", 7)
+sim.control("smart_panel_01", "line_off", 8)
 
 # Недопустимая команда — понятная ошибка с перечнем вариантов
 try:

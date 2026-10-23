@@ -541,16 +541,6 @@ CNC_STATE_MAP: dict[tuple[Optional[bool], str], str] = {
     (None, "Sleep"): "IDLE",
 }
 
-# Параметры probe_z, которые можно передать в value, и допустимые диапазоны
-CNC_PROBE_LIMITS: dict[str, tuple[float, float]] = {
-    "distance": (0.1, 30.0),          # мм вниз от текущей точки
-    "feed": (1.0, 300.0),             # мм/мин
-    "plate_thickness": (0.0, 30.0),   # мм
-    "retract": (0.0, 20.0),           # мм
-    "second_pass_feed": (1.0, 100.0), # мм/мин
-    "latch_distance": (0.1, 5.0),     # мм
-}
-
 # $-команды, разрешённые в send_gcode (только чтение). Homing и снятие Alarm —
 # отдельными действиями home / reset_alarm; запись настроек ($N=..., $RST) запрещена.
 CNC_SAFE_DOLLAR = {"$G", "$#", "$I"}
@@ -570,12 +560,17 @@ class CNCAdapter(RealDeviceAdapter):
         home         $H;
         reset_alarm  $X — снять Alarm без homing (позиция может быть неверной);
         send_gcode   одна строка G-code (из $-команд — только чтение: $G, $#, $I);
-        probe_z      поиск нуля Z пробником; value — необязательный dict с параметрами
-                     из CNC_PROBE_LIMITS.
+        probe_z      поиск нуля Z пробником (G38.2 + G10 L20); value — необязательный dict
+                     с параметрами из CNC_PROBE_LIMITS (nodes/production.py);
+        move         jog GRBL ($J=G91/G90 G21 ... F...): не меняет модальное состояние
+                     (G90/G91 файла), цель за soft limits GRBL отклоняет (error:15);
+        set_zero     текущая точка — ноль активной рабочей СК по осям (G10 L20 P0 X0 Y0 Z0).
+    move / set_zero / probe_z — только в Idle, без задания. Параметры проверяют те же функции,
+    что в симуляторе (CNCMill.parse_move / parse_axes / parse_probe).
     Запрос list_files (params: {"validate": bool}) — G-code файлы каталога gcode_dir
     (CNCController.list_gcode_files); имена файлов (files) есть и в телеметрии.
 
-    home / reset_alarm / probe_z / send_gcode выполняются в worker-потоке контроллера
+    home / reset_alarm / probe_z / move / set_zero / send_gcode выполняются в worker-потоке контроллера
     дольше таймаута команды сервера. Поэтому execute() ждёт результат COMMAND_GRACE_S:
     мгновенные ошибки (error:N, Alarm, занятость) уходят клиенту, а если команда ещё идёт —
     она считается принятой, итог виден в телеметрии (state / error_text).
@@ -585,7 +580,7 @@ class CNCAdapter(RealDeviceAdapter):
     подключения обрывы контроллер обрабатывает сам.
     """
     node_id = "cnc_01"
-    title = "ЧПУ-фрезер 3018 Pro (GRBL)"
+    title = "ЧПУ-фрезер Lunyee 3018 Pro Max (GRBL)"
     RETRY_S = 30.0
     COMMAND_GRACE_S = 2.0
     GCODE_GRACE_S = 5.0
@@ -720,6 +715,11 @@ class CNCAdapter(RealDeviceAdapter):
             "x_mm": round(s.x, 3) if s.x is not None else None,
             "y_mm": round(s.y, 3) if s.y is not None else None,
             "z_mm": round(s.z, 3) if s.z is not None else None,
+            "mpos_mm": [round(v, 3) for v in s.mpos] if s.mpos is not None else None,
+            "wco_mm": [round(v, 3) for v in s.wco] if s.wco is not None else None,
+            "last_probe": None if s.last_probe is None else {
+                "x_mm": round(s.last_probe.x, 3), "y_mm": round(s.last_probe.y, 3),
+                "z_mm": round(s.last_probe.z, 3), "success": s.last_probe.success},
             "spindle_rpm": s.spindle_rpm,   # из отчёта FS; spindle_on обновляется только по $G
             "file_name": Path(s.current_file).name if s.current_file else None,
             "files": list(self._files),
@@ -743,29 +743,19 @@ class CNCAdapter(RealDeviceAdapter):
         return path
 
     @staticmethod
-    def _probe_params(value: Any) -> dict[str, float]:
-        if value is None:
-            return {}
-        if not isinstance(value, dict):
-            raise RealCommandError("probe_z: value — объект с параметрами "
-                                   f"{', '.join(CNC_PROBE_LIMITS)} (все необязательны)")
-        unknown = set(value) - set(CNC_PROBE_LIMITS)
-        if unknown:
-            raise RealCommandError(f"probe_z: неизвестные параметры {sorted(unknown)}. "
-                                   f"Доступно: {', '.join(CNC_PROBE_LIMITS)}")
-        params: dict[str, float] = {}
-        for key, raw in value.items():
-            if raw is None:
-                continue
-            lo, hi = CNC_PROBE_LIMITS[key]
-            try:
-                v = float(raw)
-            except (TypeError, ValueError):
-                raise RealCommandError(f"probe_z: {key} — ожидалось число, получено {raw!r}") from None
-            if not lo <= v <= hi:
-                raise RealCommandError(f"probe_z: {key} должен быть в диапазоне {lo:g}..{hi:g}")
-            params[key] = v
-        return params
+    def _jog_line(move: dict[str, Any]) -> str:
+        """Jog GRBL: G91 — смещение, G90 — рабочие координаты; модальное состояние не меняется."""
+        axes = " ".join(f"{a.upper()}{move[a]:.3f}" for a in "xyz" if move[a] is not None)
+        return f"$J={'G91' if move['mode'] == 'relative' else 'G90'} G21 {axes} F{move['feedrate']:g}"
+
+    @staticmethod
+    def _require_setup_state(c, action: str, allowed: tuple[str, ...] = ("Idle",)) -> None:
+        """Наладка (move / set_zero / probe_z) — только без задания и в состоянии allowed."""
+        st = c.get_state()
+        if st.milling:
+            raise RealCommandError(f"{action}: идёт задание фрезеровки — дождитесь завершения")
+        if st.machine_state.split(":", 1)[0] not in allowed:
+            raise RealCommandError(f"{action}: станок должен быть в Idle (сейчас {st.machine_state})")
 
     @staticmethod
     def _gcode_line(value: Any) -> str:
@@ -862,8 +852,23 @@ class CNCAdapter(RealDeviceAdapter):
             self._submit(action, c.unlock, self.COMMAND_GRACE_S)
             return
         elif action == "probe_z":
-            params = self._probe_params(value)
+            from dome_simulator.nodes.production import CNCMill
+            params = _sim_check(CNCMill.parse_probe, value)
+            self._require_setup_state(c, action)
             self._submit(action, lambda: c.probe_z_zero(**params), self.COMMAND_GRACE_S)
+            return
+        elif action == "move":
+            from dome_simulator.nodes.production import CNCMill
+            line = self._jog_line(_sim_check(CNCMill.parse_move, value))
+            self._require_setup_state(c, action, ("Idle", "Jog"))
+            self._submit(action, lambda: c.send_command(line), self.COMMAND_GRACE_S)
+            return
+        elif action == "set_zero":
+            from dome_simulator.nodes.production import CNCMill
+            axes = _sim_check(CNCMill.parse_axes, value)
+            self._require_setup_state(c, action)
+            line = "G10 L20 P0 " + " ".join(f"{a.upper()}0" for a in axes)
+            self._submit(action, lambda: c.send_command(line), self.COMMAND_GRACE_S)
             return
         elif action == "send_gcode":
             line = self._gcode_line(value)
@@ -871,7 +876,8 @@ class CNCAdapter(RealDeviceAdapter):
             return
         else:
             raise RealCommandError(f"Реальный фрезер не поддерживает {action!r} (доступно: feed_hold, hold, "
-                                   "resume, abort, home, reset_alarm, start_job, send_gcode, probe_z)")
+                                   "resume, abort, home, reset_alarm, start_job, send_gcode, probe_z, "
+                                   "move, set_zero)")
         self._acked_error = c.get_state().error
 
     async def execute(self, action: str, value: Any = None) -> None:

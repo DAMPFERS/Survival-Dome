@@ -17,6 +17,9 @@ TYC/chem_reactor_client.py): те же датчики, индексы и ком�
 
 Двери (концевики) открывает Оператор руками (set_door, physical) — только при
 разблокированном магнитном замке.
+
+Питание — линия щитка (control_powered, rules.py: ФабЛаб — линия 2, Химлаб — линия 5).
+Без питания стенд не отвечает (online = false), вентиляторы стоят, команды отклоняются.
 """
 from __future__ import annotations
 
@@ -60,7 +63,19 @@ class _Greenhouse(SandboxNode):
 
     def _fan_state(self) -> dict[str, Any]:
         return {"fans_pwm": [128] * self.FANS, "fans_rpm": [0] * self.FANS,
-                "doors": [CLOSED] * self.DOORS}
+                "doors": [CLOSED] * self.DOORS, "control_powered": True}
+
+    def simulate(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
+        if not node["control_powered"]:
+            return {"online": False, "fans_rpm": [0] * self.FANS}
+        return {**self.simulate_powered(gdt, node), "online": True}
+
+    def simulate_powered(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def _require_power(self, node: dict[str, Any]) -> None:
+        if not node["control_powered"]:
+            raise ControlError(f"{self.title} обесточена: линия щитка выключена")
 
     def _rpm(self, pwm: int, current: float, gdt: float) -> float:
         target = 0.0 if pwm < self.MIN_SPIN_PWM else self.MAX_RPM * pwm / 255.0
@@ -90,6 +105,7 @@ class _Greenhouse(SandboxNode):
     @control("set_fan_pwm")
     def _set_fan_pwm(self, node, value):
         """value: {"fan": индекс, "pwm": 0..255}."""
+        self._require_power(node)
         fan, pwm = self._set_pwm(node, value)
         fans = list(node["fans_pwm"])
         fans[fan] = pwm
@@ -160,7 +176,7 @@ class GreenhouseFabLab(_Greenhouse):
     def _locked(self, node, door):
         return node["locks"][door] == LOCKED
 
-    def simulate(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
+    def simulate_powered(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
         pwm = list(node["fans_pwm"])
         if node["fault_mode"] == 1:
             self._fault_timer += gdt
@@ -230,6 +246,7 @@ class GreenhouseFabLab(_Greenhouse):
     @control("set_fan_pwm")
     def _set_fan_pwm(self, node, value):
         """value: {"fan": 0..5, "pwm": 0..255}."""
+        self._require_power(node)
         fan, pwm = self._set_pwm(node, value)
         if node["fault_mode"] == 2 and fan == node["fault_fan"]:
             pwm = self.rng.randint(0, 255)
@@ -240,6 +257,7 @@ class GreenhouseFabLab(_Greenhouse):
     @control("set_lock", "lock")
     def _set_lock(self, node, value):
         """value: {"lock": 0..1, "locked": true|false}."""
+        self._require_power(node)
         idx = _index(value, "lock", self.DOORS, "Индекс замка")
         locks = list(node["locks"])
         locks[idx] = LOCKED if parse_bool(value.get("locked"), True) else UNLOCKED
@@ -248,6 +266,7 @@ class GreenhouseFabLab(_Greenhouse):
     @control("set_vacuum", "vacuum")
     def _set_vacuum(self, node, value):
         """value: 1/0 (true/false) или {"mode": 1|0}."""
+        self._require_power(node)
         mode = value.get("mode") if isinstance(value, dict) else value
         if mode is None:
             raise ControlError("set_vacuum: ожидалось 1 (включить) или 0 (выключить)")
@@ -309,7 +328,7 @@ class GreenhouseChemLab(_Greenhouse):
     def _locked(self, node, door):
         return node["lock"] == LOCKED
 
-    def simulate(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
+    def simulate_powered(self, gdt: float, node: dict[str, Any]) -> dict[str, Any]:
         rpm, flow_in, flow_out = self._airflow(list(node["fans_pwm"]), node, gdt)
         relay = node["relay_fan_level"] / self.RELAY_LEVELS
         indoor = self.env.indoor
@@ -343,12 +362,14 @@ class GreenhouseChemLab(_Greenhouse):
     @control("set_relay_fan_level", "set_relay_level")
     def _set_relay_level(self, node, value):
         """value: уровень релейного вентилятора lmp8 0..10 (или {"level": ...})."""
+        self._require_power(node)
         level = value.get("level") if isinstance(value, dict) else value
         return {"relay_fan_level": int(parse_number(level, 0, self.RELAY_LEVELS, "Уровень релейного вентилятора"))}
 
     @control("set_lock", "lock")
     def _set_lock(self, node, value):
         """value: true/false (или {"locked": ...}) — общий замок, оба замка сразу."""
+        self._require_power(node)
         locked = value.get("locked") if isinstance(value, dict) else value
         if locked is None:
             raise ControlError("set_lock: ожидалось true (заблокировать) или false (разблокировать)")

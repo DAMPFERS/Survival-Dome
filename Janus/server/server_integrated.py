@@ -135,9 +135,6 @@ ENERGY_NODES = ("solar_inverter_01", "battery_01")
 KEYS_CONFIG = os.getenv("DOME_KEYS_CONFIG", str(SERVER_DIR / "authorization" / "keys_config.json"))
 POLICY_FILE = os.getenv("DOME_POLICY_FILE", str(SERVER_DIR / "authorization" / "access_policy.json"))
 
-# Действия, которые есть только у реального устройства (в симуляторе их нет)
-REAL_ONLY_ACTIONS = {"cnc_01": ("probe_z",)}
-
 CLOSE_UNAUTHORIZED = 4401
 CLOSE_REVOKED = 4403
 
@@ -533,7 +530,6 @@ class DomeServer:
                 adapter = self.adapters.get(node_id)
                 info["mode"] = self.node_modes.get(node_id, "virtual")
                 info["real_device"] = adapter.status() if adapter else None
-                info["real_only_controls"] = list(REAL_ONLY_ACTIONS.get(node_id, ()))
             else:
                 allowed = self.policy.allowed_actions(session.role, node_id, info["controls"])
                 info["controls"] = allowed
@@ -650,7 +646,7 @@ class DomeServer:
         if not changes:
             raise RequestError("Нужно указать хотя бы одно из: actions, visible, hidden_params")
         if isinstance(changes.get("actions"), list):
-            valid = set(self._node_controls(node_id)) | set(REAL_ONLY_ACTIONS.get(node_id, ()))
+            valid = set(self._node_controls(node_id))
             unknown = [a for a in changes["actions"] if not isinstance(a, str) or a.lower() not in valid]
             if unknown:
                 raise RequestError(f"Неизвестные действия {unknown}. Доступно: {sorted(valid)}")

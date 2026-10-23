@@ -14,6 +14,7 @@ from typing import Any, Optional
 from .context import SimContext
 from .crisis_base import AUTO, BATTERY, CNC, INVERTER, PANEL, PRINTER, PRODUCTION_LINES, Crisis
 from .environment import clamp
+from .nodes.power import LINE_RESERVE
 
 VENT, SEALING, TANK, DIESEL = "supply_ventilation_01", "dome_sealing_01", "fuel_tank_01", "dizel_1"
 FIRE, ACCESS, EDGE, COOLING = "fire_suppression_01", "access_control_01", "edge_compute_01", "equipment_cooling_01"
@@ -375,7 +376,7 @@ class WeakEarthquake(Crisis):
         doors = {k: dict(v) for k, v in ctx.get(ACCESS, "doors").items()}
         doors["STORAGE"]["state"] = "FORCED"
         ctx.update(ACCESS, doors=doors, alarm=True, alarm_reason="STORAGE_FORCED", system_state="ALARM")
-        self.cmd(ctx, PANEL, "emulate_protection_trip", {"line": int(self.p("line", 7)), "type": "RCD_TRIP"})
+        self.cmd(ctx, PANEL, "emulate_protection_trip", {"line": int(self.p("line", LINE_RESERVE)), "type": "RCD_TRIP"})
         self.aftershock = False
 
     def observe(self, ctx, cmd):

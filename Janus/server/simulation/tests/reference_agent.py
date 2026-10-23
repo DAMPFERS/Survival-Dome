@@ -16,6 +16,8 @@ from typing import Any, Callable
 
 from dome_simulator import ControlError
 from dome_simulator import holds
+from dome_simulator.nodes.power import (LINE_CNC, LINE_EMERGENCY_LIGHTING, LINE_LIGHTING, LINE_RESERVE,
+                                        LINE_WORKSHOP)
 
 AUTO = "dome_automation_01"
 
@@ -37,23 +39,24 @@ class ReferenceAgent:
             (0.3, "n37", [(*trust("weather_station_01", "wind_direction_deg"), "agent"),
                           (*trust("weather_station_01", "wind_direction"), "agent")]),
             (0.4, "n22", [("thermal_insulation_01", "set_poll_interval", 500, "agent")]),
-            (12.5, "n01", [("smart_panel_01", "line_off", 8, "agent")]),
+            (12.5, "n01", [("smart_panel_01", "line_off", LINE_RESERVE, "agent")]),
             (18.3, "n05", [("cnc_01", "resume", None, "agent")]),
             (22.5, "n19", []),
             (26.3, "n06", [(*trust("climate_sensor_01", "co2_ppm"), "agent"),
                            (AUTO, "set_primary_sensor", "climate_sensor_02", "agent")]),
-            (31.5, "n26a", [("meeting_01", "say", "Утечка на линии 2 растёт — осмотрите кабель фрезера", "agent")]),
-            (32.0, "n26b", [("smart_panel_01", "inspect_line", 2, "operator")]),
+            (31.5, "n26a", [("meeting_01", "say", "Утечка на линии фрезера растёт — осмотрите кабель", "agent")]),
+            (32.0, "n26b", [("smart_panel_01", "inspect_line", LINE_CNC, "operator")]),
             (37.0, "n23", [("network_link_01", "switch_path", "RESERVE", "operator")]),
-            (42.5, "n29", [("smart_panel_01", "line_off", 4, "agent"), ("smart_panel_01", "line_on", 5, "agent")]),
+            (42.5, "n29", [("smart_panel_01", "line_off", LINE_LIGHTING, "agent"),
+                           ("smart_panel_01", "line_on", LINE_EMERGENCY_LIGHTING, "agent")]),
             (48.3, "n02", [("solar_inverter_01", "cancel_balancing", None, "agent")]),
             (52.3, "k01", [("fuel_tank_01", "transfer_fuel", None, "agent"),
                            ("dizel_1", "turn_on", None, "agent")]),
             (58.3, "n17", [("fume_extraction_01", "clean_filter", None, "operator")]),
             (64.2, "n27a", [(AUTO, "acknowledge", "all", "agent")]),
             (64.8, "n27b", [("smoke_detector_01", "reset_alarm", None, "agent")]),
-            (72.3, "n31", [("smart_panel_01", "line_off", 7, "agent")]),
-            (84.1, "n47", [("smart_panel_01", "line_on", 5, "agent")]),
+            (72.3, "n31", [("smart_panel_01", "line_off", LINE_RESERVE, "agent")]),
+            (84.1, "n47", [("smart_panel_01", "line_on", LINE_EMERGENCY_LIGHTING, "agent")]),
             # К3: попросить Оператора не включать фен, пока греется стол принтера
             (86.1, "k03", [("smart_panel_01", "set_workstation", "SOLDERING", "operator")]),
         ]
@@ -113,18 +116,16 @@ class ReferenceAgent:
             self.cmd("thermal_insulation_01", "set_lock", {"lock": 0, "locked": False})
             if sim.get("thermal_insulation_01", "locks")[0] == "UNLOCKED":
                 self.say("Бокс ФабЛаб открыт, стол холодный — можно забирать деталь")
-        # вытяжка: включить после остывания двигателя
+        # вытяжка: сбросить аварию после остывания двигателя
         fume = sim.get_node("fume_extraction_01")
         if fume["motor_state"] == "OVERHEAT" and fume["motor_temp_c"] < 58:
             self.cmd("fume_extraction_01", "reset_alarm")
-        if sim.get("smart_panel_01", "lines")[5]["state"] == "OFF" and fume["motor_state"] == "OK":
-            self.cmd("smart_panel_01", "line_on", 6)
-        # линия 1 должна быть под питанием (кроме срабатывания защиты)
-        line1 = sim.get("smart_panel_01", "lines")[0]
-        if line1["state"] == "OFF":
-            self.cmd("smart_panel_01", "line_on", 1)
-        elif line1["state"] in ("TRIPPED", "RCD_TRIP"):
-            self.cmd("smart_panel_01", "reset_protection", 1)
+        # линия производственного отдела должна быть под питанием (кроме срабатывания защиты)
+        workshop = sim.get("smart_panel_01", "lines")[LINE_WORKSHOP - 1]
+        if workshop["state"] == "OFF":
+            self.cmd("smart_panel_01", "line_on", LINE_WORKSHOP)
+        elif workshop["state"] in ("TRIPPED", "RCD_TRIP"):
+            self.cmd("smart_panel_01", "reset_protection", LINE_WORKSHOP)
         # сработавшие интерлоки по ложным данным — снять
         ils = sim.get(AUTO, "interlocks")
         for il in ("IL_LOAD_SHED", "IL_CO2", "IL_HEAT", "IL_INV_OVERLOAD"):
@@ -133,9 +134,9 @@ class ReferenceAgent:
         # отказ вентилятора инвертора: держать нагрузку ниже, пока горячо
         if sim.get("solar_inverter_01", "inverter_temp_c") > 68:
             lines = sim.get("smart_panel_01", "lines")
-            if lines[3]["state"] == "ON":
-                self.cmd("smart_panel_01", "line_off", 4)
-                self.cmd("smart_panel_01", "line_on", 5)
+            if lines[LINE_LIGHTING - 1]["state"] == "ON":
+                self.cmd("smart_panel_01", "line_off", LINE_LIGHTING)
+                self.cmd("smart_panel_01", "line_on", LINE_EMERGENCY_LIGHTING)
         # К1: дизель после перекачки топлива
         if sim.get("dizel_1", "state") == "FAULT" and sim.get("fuel_tank_01", "fuel_quality") == "GOOD":
             self.cmd("dizel_1", "turn_off")

@@ -16,7 +16,7 @@
     производство принтер → катушка на складе (расход, обрыв филамента);
                  ЧПУ/принтер → тепловая нагрузка контура охлаждения → температура шпинделя
     воздух       приток, клапаны и утечки оболочки → воздухообмен купола;
-                 пайка (линия 1), печать, вытяжка → VOC; дверь склада → дым/CO из склада;
+                 пайка (линия 1 — произв. отдел), печать, вытяжка → VOC; дверь склада → дым/CO из склада;
                  приток → температура техпомещения АКБ
     вода         резервуар (поплавок) → насос → фильтр → резервуар;
                  перепад на фильтре → нагрузка насоса; пожаротушение ← вода резервуара;
@@ -35,7 +35,8 @@ from .context import SimContext
 from .environment import clamp
 from .events import Severity
 from .nodes.automation import INTERLOCKS, trust_key
-from .nodes.power import PANEL_LINES
+from .nodes.power import (LINE_CNC, LINE_GREENHOUSE_CHEMLAB, LINE_GREENHOUSE_FABLAB, LINE_PRINTER,
+                          LINE_RESERVE, LINE_WORKSHOP, PANEL_LINES)
 from .nodes.water import water_demand_l_min
 
 RuleFunc = Callable[[SimContext, float], None]
@@ -48,9 +49,17 @@ VENT, SEALING, EDGE, COOLING, INVENTORY = ("supply_ventilation_01", "dome_sealin
 PUMP, WTANK, WFILTER, FIRE, ACCESS = ("water_pump_01", "water_tank_01", "water_filter_01",
                                       "fire_suppression_01", "access_control_01")
 AUTO, WEATHER = "dome_automation_01", "weather_station_01"
+GH_FABLAB, GH_CHEMLAB = "thermal_insulation_01", "thermal_insulation_02"
 SMOKE_DETECTORS = ("smoke_detector_01", "smoke_detector_02")
 
-SOLDER_THRESHOLD_W = 200.0       # нагрузка линии 1 выше — идёт пайка
+# Потребители, запитанные от линий щитка: без напряжения на линии узел обесточен
+LINE_CONSUMERS = ((CNC, LINE_CNC), (PRINTER, LINE_PRINTER), (FUME, LINE_WORKSHOP),
+                  (GH_FABLAB, LINE_GREENHOUSE_FABLAB), (GH_CHEMLAB, LINE_GREENHOUSE_CHEMLAB))
+# Сброс нагрузки (IL_LOAD_SHED, IL_INV_OVERLOAD): ступень 1 — второстепенное, ступень 2 — станки
+SHED_STAGE1 = (LINE_RESERVE, LINE_WORKSHOP)
+SHED_STAGE2 = (LINE_PRINTER, LINE_CNC)
+
+SOLDER_THRESHOLD_W = 300.0       # нагрузка линии LINE_WORKSHOP выше — идёт пайка (простой 120 Вт + вытяжка 95 Вт)
 EDGE_POWER_W = 60.0
 BUS_ALIVE_V = 100.0
 
@@ -158,16 +167,19 @@ def power_distribution_rule(ctx: SimContext, dt: float) -> None:
     def live(n: int) -> bool:
         return panel["lines"][n - 1]["state"] == "ON" and powered
 
-    for node_id, line in ((CNC, 2), (PRINTER, 3), (FUME, 6)):
+    for node_id, line in LINE_CONSUMERS:
         _set_if_changed(ctx, node_id, control_powered=live(line))
     for node_id in (EDGE, VENT):
         _set_if_changed(ctx, node_id, control_powered=bool(bus_powered))
 
     loads = {}
-    for node_id, line in ((CNC, 2), (PRINTER, 3), (FUME, 6)):
+    for node_id, line in ((CNC, LINE_CNC), (PRINTER, LINE_PRINTER)):
         if ctx.has(node_id):
             loads[str(line)] = round(_device_demand_w(ctx, node_id), 1)
     _set_if_changed(ctx, PANEL, control_line_loads_w=loads)
+    # вытяжка FabLab запитана от линии производственного отдела вместе с рабочим местом
+    extra = {str(LINE_WORKSHOP): round(_device_demand_w(ctx, FUME), 1)} if ctx.has(FUME) else {}
+    _set_if_changed(ctx, PANEL, control_line_extra_w=extra)
 
     # Нагрузка инвертора = щит + службы купола (приток, охлаждение, насос, edge, связь)
     services = 15.0
@@ -241,8 +253,8 @@ def air_rule(ctx: SimContext, dt: float) -> None:
     if ctx.has(PRINTER):
         d.printing = ctx.get(PRINTER, "state") == "PRINTING"
     if ctx.has(PANEL):
-        line1 = ctx.line(1)
-        d.solder_active = float(line1.get("power_w", 0.0)) > SOLDER_THRESHOLD_W
+        workshop = ctx.line(LINE_WORKSHOP)
+        d.solder_active = float(workshop.get("power_w", 0.0)) > SOLDER_THRESHOLD_W
     if ctx.has(ACCESS):
         door = ctx.get(ACCESS, "doors", {}).get("STORAGE", {})
         d.storage_door_open = (not door.get("locked", True)) or door.get("state") in ("OPEN", "FORCED")
@@ -276,7 +288,7 @@ def water_rule(ctx: SimContext, dt: float) -> None:
         _set_if_changed(ctx, FIRE, control_water_available_l=round(float(tank["volume_l"]), 1),
                         control_supply_ok=pump["state"] != "FAULT")
 
-    # Пожаротушение в FABLAB заливает рабочее место: через 2 мин УЗО линии 1
+    # Пожаротушение в FABLAB заливает рабочее место: через 2 мин УЗО линии производственного отдела
     if ctx.has(FIRE) and ctx.has(PANEL):
         fire = ctx.node(FIRE)
         mem = ctx.memory.setdefault("flooding", {"s": 0.0, "tripped": False})
@@ -284,8 +296,9 @@ def water_rule(ctx: SimContext, dt: float) -> None:
             mem["s"] += dt
             if mem["s"] >= 120.0 and not mem["tripped"]:
                 mem["tripped"] = True
-                if ctx.line(1)["state"] == "ON":
-                    ctx.command(PANEL, "emulate_protection_trip", {"line": 1, "type": "RCD_TRIP"}, origin="system")
+                if ctx.line(LINE_WORKSHOP)["state"] == "ON":
+                    ctx.command(PANEL, "emulate_protection_trip", {"line": LINE_WORKSHOP, "type": "RCD_TRIP"},
+                                origin="system")
                 ctx.emit("fablab.flooded", Severity.CRITICAL, source="rules", zone="FABLAB")
         else:
             mem["s"] = 0.0
@@ -451,7 +464,7 @@ def automation_rule(ctx: SimContext, dt: float) -> None:
             paused, shed = [], []
             if zone == "FABLAB":
                 _pause_machines(ctx, paused, "IL_SMOKE")
-                _line_off(ctx, 1, shed)
+                _line_off(ctx, LINE_WORKSHOP, shed)
             entry = trip_event("IL_SMOKE", f"Дым в зоне {zone}: через 60 с без квитирования — пожаротушение",
                                zone=zone)
             zones[zone] = {"event_id": entry["event_id"], "paused": paused,
@@ -522,7 +535,7 @@ def automation_rule(ctx: SimContext, dt: float) -> None:
         if ready and st["state"] == "ARMED":
             st.update(state="TRIPPED", trips=st.get("trips", 0) + 1, tripped_at_s=round(now, 1), stage=1)
             shed: list[int] = []
-            for n in (8, 7, 1):
+            for n in SHED_STAGE1:
                 _line_off(ctx, n, shed)
             st["shed_lines"] = shed
             reason = ("SOC" if mem["shed_soc_s"] >= spec["soc_delay_s"] else
@@ -540,7 +553,7 @@ def automation_rule(ctx: SimContext, dt: float) -> None:
             if st.get("stage", 1) == 1 and (st["stage_s"] >= spec["stage2_delay_s"] or deep):
                 st["stage"] = 2
                 shed = list(st.get("shed_lines", []))
-                for n in (6, 3, 2):
+                for n in SHED_STAGE2:
                     _line_off(ctx, n, shed)
                 st["shed_lines"] = shed
                 trip_event("IL_LOAD_SHED", f"Сброс нагрузки, ступень 2: отключены линии {shed}")
@@ -567,7 +580,7 @@ def automation_rule(ctx: SimContext, dt: float) -> None:
     # --- IL_INV_OVERLOAD ---
     if step("IL_INV_OVERLOAD", r.value(INVERTER, "error_code") == "E07", INTERLOCKS["IL_INV_OVERLOAD"]["delay_s"]):
         shed = []
-        for n in (8, 7, 1):
+        for n in SHED_STAGE1:
             _line_off(ctx, n, shed)
         ils["IL_INV_OVERLOAD"]["shed_lines"] = shed
         trip_event("IL_INV_OVERLOAD", f"Инвертор сообщает E07: отключены линии {shed}")
@@ -576,8 +589,7 @@ def automation_rule(ctx: SimContext, dt: float) -> None:
     inv_t = r.number(INVERTER, "inverter_temp_c")
     if step("IL_HEAT", inv_t is not None and inv_t > 75.0, INTERLOCKS["IL_HEAT"]["delay_s"]):
         shed = []
-        for n in (1, 6):
-            _line_off(ctx, n, shed)
+        _line_off(ctx, LINE_WORKSHOP, shed)   # пайка и вытяжка — самая горячая нагрузка
         ils["IL_HEAT"]["shed_lines"] = shed
         trip_event("IL_HEAT", f"Температура инвертора {inv_t:.0f} °C: отключены линии {shed}")
 

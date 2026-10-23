@@ -11,17 +11,18 @@
 Интерлоки:
     IL_CO2          CO₂ > 2000 ppm (60 с)        → пауза принтера и ЧПУ, приток FRESH_AIR 100 %
     IL_CONDENSATE   RH > 90 % или T − Tросы < 1 °C (60 с) → пауза ЧПУ
-    IL_SMOKE        датчик дыма зоны в ALARM     → FABLAB: пауза станков, линия 1 выкл.;
+    IL_SMOKE        датчик дыма зоны в ALARM     → FABLAB: пауза станков, линия 1 (произв. отдел) выкл.;
                                                    через 60 с без квитирования — пожаротушение зоны
     IL_LOAD_SHED    SOC < 25 % (120 с), прогноз автономности < 1 ч без внешнего резерва (180 с)
-                    или дефицит мощности (20 с)  → линии 8, 7, 1; при продолжении — 6, 3, 2;
-                                                   автозапуск дизеля
+                    или дефицит мощности (20 с)  → линии 8, 1 (резерв, произв. отдел); при продолжении —
+                                                   3, 4 (принтер, фрезер); автозапуск дизеля
     IL_STORM        ветер > 20 м/с (30 с)        → ветрогенератор выкл., клапаны закрыты, RECIRCULATION
     IL_OVERVOLT     напряжение линии > 245 В (120 с) → отключение линии
-    IL_INV_OVERLOAD инвертор сообщает E07 (120 с) → линии 8, 7, 1
-    IL_HEAT         температура инвертора > 75 °C (120 с) → линии 1, 6
+    IL_INV_OVERLOAD инвертор сообщает E07 (120 с) → линии 8, 1
+    IL_HEAT         температура инвертора > 75 °C (120 с) → линия 1 (пайка и вытяжка)
     IL_OVERCURRENT  ток линии > 90 % уставки (120 с) → отключение линии (уставка линии 1 —
-                    бюджет рабочего места 2 А, остальных — номинал автомата)
+                    бюджет рабочего места с вытяжкой 2,5 А, остальных — номинал автомата)
+Номера линий — константы LINE_* в nodes/power.py (rules.py: SHED_STAGE1/2).
 
 Команды агента: set_data_trust, block_interlock (≤ 30 мин), unblock_interlock,
 reset_interlock («снять» сработавший интерлок: он перевзводится, отключённые им
@@ -35,6 +36,7 @@ from typing import Any, Optional
 
 from ..events import Severity
 from .base import register_node_type
+from .power import LINE_WORKSHOP
 from .sandbox import ControlError, SandboxNode, control, parse_bool, parse_choice, parse_number
 
 INTERLOCKS: dict[str, dict[str, Any]] = {
@@ -97,7 +99,7 @@ class DomeAutomation(SandboxNode):
             "primary_co2_sensor": "climate_sensor_01",
             "ventilation_auto": True,
             "diesel_autostart": True,
-            "line_current_limits_a": {"1": 2.0},
+            "line_current_limits_a": {str(LINE_WORKSHOP): 2.5},
             "autonomy_forecast_h": None,
             "control_requests": [],
         }

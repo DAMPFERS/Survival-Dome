@@ -25,9 +25,10 @@ from typing import Any, Iterable, Optional
 
 from .context import Command, SimContext
 from .events import Severity
+from .nodes.power import LINE_CNC, LINE_PRINTER, LINE_WORKSHOP
 from .scenario_engine import CrisisScenario, Intercept  # noqa: F401  (реэкспорт для кризисов)
 
-PRODUCTION_LINES = (1, 2, 3, 6)
+PRODUCTION_LINES = (LINE_WORKSHOP, LINE_PRINTER, LINE_CNC)
 PANEL, PRINTER, CNC, INVERTER, BATTERY = ("smart_panel_01", "printer_3d_01", "cnc_01",
                                           "solar_inverter_01", "battery_01")
 AUTO = "dome_automation_01"

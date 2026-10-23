@@ -231,7 +231,7 @@ def test_smart_panel_lines(stepped_simulator):
     sim.step()
     lines = sim.get("smart_panel_01", "lines")
     assert [l["line"] for l in lines] == list(range(1, 9))
-    assert lines[1]["name"] == "ЧПУ-фрезер"
+    assert lines[1]["name"] == "Теплица ФабЛаб" and lines[3]["name"] == "ЧПУ-фрезер"
 
     sim.control("smart_panel_01", "line_off", 4)
     sim.step()
@@ -445,6 +445,61 @@ def test_cnc_job_hold_abort(stepped_simulator):
     steps(sim, 1)
     c = sim.get_node("cnc_01")
     assert c["state"] == "IDLE" and c["spindle_rpm"] == 0.0
+
+
+def test_cnc_setup_move_probe_zero(stepped_simulator):
+    sim = stepped_simulator
+    _quiet_production(sim)
+    cnc = lambda action, value=None: sim.control("cnc_01", action, value, origin="agent")
+    cnc("home")
+    # с высоты HOME пробник по умолчанию (10 мм) до заготовки не достаёт — ALARM:5
+    cnc("probe_z")
+    c = sim.get_node("cnc_01")
+    assert c["state"] == "ALARM" and c["alarm_code"] == "ALARM:5" and c["last_probe"]["success"] is False
+    cnc("home")
+    cnc("move", {"x": 120, "y": 60, "z": -15, "feedrate": 800})
+    cnc("probe_z", {"plate_thickness": 0.5, "retract": 3})
+    c = sim.get_node("cnc_01")
+    assert c["state"] == "IDLE" and c["last_probe"]["success"] is True
+    assert c["z_mm"] == 3.5 and c["mpos_mm"][2] == round(c["last_probe"]["z_mm"] + 3, 3)
+    cnc("set_zero", "xy")
+    c = sim.get_node("cnc_01")
+    assert (c["x_mm"], c["y_mm"]) == (0.0, 0.0) and c["wco_mm"][:2] == [120.0, 60.0]
+    cnc("move", {"x": 10, "y": 5, "mode": "absolute"})
+    c = sim.get_node("cnc_01")
+    assert (c["x_mm"], c["y_mm"]) == (10.0, 5.0) and c["mpos_mm"][:2] == [130.0, 65.0]
+    cnc("home")                                     # HOME — машинный ноль, рабочая СК сохраняется
+    assert sim.get("cnc_01", "x_mm") == -120.0 and sim.get("cnc_01", "wco_mm")[0] == 120.0
+
+
+@pytest.mark.parametrize("action, value", [
+    ("move", {"x": 400}),                           # смещение больше хода оси
+    ("move", {"x": 250, "mode": "absolute"}),       # рабочий X 250 + WCO 120 — за пределом стола
+    ("move", {"x": 1, "speed": 5}),                 # неизвестный параметр
+    ("move", {}),                                   # нет осей
+    ("set_zero", "xq"),
+    ("probe_z", {"foo": 1}),
+    ("probe_z", {"distance": 50}),
+])
+def test_cnc_setup_rejects(stepped_simulator, action, value):
+    sim = stepped_simulator
+    _quiet_production(sim)
+    sim.control("cnc_01", "home")
+    sim.control("cnc_01", "move", {"x": 120})
+    sim.control("cnc_01", "set_zero", "x")
+    before = sim.get_node("cnc_01")
+    with pytest.raises(ControlError):
+        sim.control("cnc_01", action, value, origin="agent")
+    assert sim.get("cnc_01", "mpos_mm") == before["mpos_mm"] and sim.get("cnc_01", "state") == "IDLE"
+
+
+def test_cnc_setup_only_when_idle(stepped_simulator):
+    sim = stepped_simulator
+    _quiet_production(sim)
+    sim.control("cnc_01", "start_job", "pcb_sensor_hub.nc")
+    for action, value in (("move", {"x": 1}), ("set_zero", None), ("probe_z", None)):
+        with pytest.raises(ControlError):
+            sim.control("cnc_01", action, value, origin="agent")
 
 
 def test_cnc_soft_limit_alarm(stepped_simulator):

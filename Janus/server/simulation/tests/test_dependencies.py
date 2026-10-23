@@ -69,6 +69,35 @@ def test_blackout_cuts_lines_and_devices(quiet):
     assert sim.get("edge_compute_01", "state") == "OFFLINE"
 
 
+@pytest.mark.parametrize("node_id, line, action, value", [
+    ("thermal_insulation_01", 2, "set_fan_pwm", {"fan": 0, "pwm": 200}),
+    ("thermal_insulation_02", 5, "set_relay_fan_level", 5),
+])
+def test_greenhouse_powered_by_its_line(quiet, node_id, line, action, value):
+    sim = quiet
+    sim.control("smart_panel_01", "line_off", line)
+    run(sim, 8)
+    gh = sim.get_node(node_id)
+    assert gh["online"] is False and not any(gh["fans_rpm"])
+    with pytest.raises(ControlError):
+        sim.control(node_id, action, value)
+    sim.control("smart_panel_01", "line_on", line)
+    run(sim, 8)
+    assert sim.get(node_id, "online") is True
+    sim.control(node_id, action, value)
+
+
+def test_fume_extraction_on_workshop_line(quiet):
+    sim = quiet
+    run(sim, 8)
+    lines = sim.get("smart_panel_01", "lines")
+    assert sim.get("smart_panel_01", "control_line_extra_w")["1"] > 0      # вытяжка — нагрузка линии 1
+    sim.control("smart_panel_01", "line_off", 1)
+    run(sim, 8)
+    assert sim.get("fume_extraction_01", "fan_rpm") == 0.0
+    assert all(l["state"] == "ON" for l in lines if l["line"] in (2, 3, 4, 6))
+
+
 def test_diesel_feeds_inverter_and_burns_fuel(quiet):
     sim = quiet
     sim.environment.force("external.grid_available", False)
@@ -219,7 +248,7 @@ def test_soldering_without_extraction_raises_voc(quiet):
     sim.update("smart_panel_01", control_workstation="SOLDERING")
     run(sim, 600)
     with_fume = sim.environment.indoor.voc_index
-    sim.control("smart_panel_01", "line_off", 6)
+    sim.control("fume_extraction_01", "turn_off")
     run(sim, 600)
     assert with_fume < 200 < sim.environment.indoor.voc_index
 
@@ -296,12 +325,12 @@ def test_release_interlock_restores_lines(quiet):
     sim.telemetry.add_distortion("solar_inverter_01", "inverter_temp_c", "const", value=95.0)
     run(sim, 128)
     lines = sim.get("smart_panel_01", "lines")
-    assert lines[0]["state"] == "OFF" and lines[5]["state"] == "OFF"
+    assert lines[0]["state"] == "OFF"
     sim.control("dome_automation_01", "block_interlock", {"id": "IL_HEAT", "minutes": 10})
     sim.control("dome_automation_01", "reset_interlock", "IL_HEAT")
     run(sim, 8)
     lines = sim.get("smart_panel_01", "lines")
-    assert lines[0]["state"] == "ON" and lines[5]["state"] == "ON"
+    assert lines[0]["state"] == "ON"
 
 
 # ---------------------------------------------------------------------------

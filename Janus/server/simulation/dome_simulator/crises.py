@@ -24,6 +24,7 @@ from .context import Command, SimContext
 from .crisis_base import (AUTO, BATTERY, CNC, INVERTER, PANEL, PRINTER, PRODUCTION_LINES, Crisis, Intercept,
                           _line_of, finite)
 from .environment import dew_point_c
+from .nodes.power import LINE_CNC, LINE_EMERGENCY_LIGHTING, LINE_LIGHTING, LINE_RESERVE, LINE_WORKSHOP
 
 WEATHER, EDGE, NET = "weather_station_01", "edge_compute_01", "network_link_01"
 CLIMATE_1, FUME, ACCESS = "climate_sensor_01", "fume_extraction_01", "access_control_01"
@@ -36,20 +37,21 @@ TRUST = "set_data_trust"
 # ---------------------------------------------------------------------------
 
 class PhantomLoad(Crisis):
-    """№1. ЭМС-наводка: +50 Вт утечки на резервной линии 8, пока она включена."""
+    """№1. ЭМС-наводка: +50 Вт утечки на резервной линии (LINE_RESERVE), пока она включена."""
     code, title, klass, kind = "№1", "Фантомное потребление линии 8", "П1", "A+B"
     duration_s = None
-    relevant_actions = ((PANEL, "line_off", 8),)
+    relevant_actions = ((PANEL, "line_off", LINE_RESERVE),)
 
     def on_start(self, ctx):
         self.watts = float(self.p("watts", 50.0))
         self.set_input(ctx, PANEL, "control_phantom_load_w", self.watts)
-        if ctx.is_real(PANEL):  # реальный щит утечку не меряет — подменяем показания линии 8
-            self.distort(ctx, PANEL, "lines[7].power_w", "offset", value=self.watts, round=1)
-            self.distort(ctx, PANEL, "lines[7].current_a", "offset", value=round(self.watts / 230.0, 3), round=3)
+        if ctx.is_real(PANEL):  # реальный щит утечку не меряет — подменяем показания резервной линии
+            i = LINE_RESERVE - 1
+            self.distort(ctx, PANEL, f"lines[{i}].power_w", "offset", value=self.watts, round=1)
+            self.distort(ctx, PANEL, f"lines[{i}].current_a", "offset", value=round(self.watts / 230.0, 3), round=3)
 
     def on_tick(self, ctx, dt):
-        if self.line_state(ctx, 8) == "ON":
+        if self.line_state(ctx, LINE_RESERVE) == "ON":
             ctx.update(PANEL, control_phantom_load_w=round(self.watts + ctx.env.rng.uniform(-5, 5), 1))
             if self.t > float(self.p("deadline_s", 600.0)):
                 self.fail(ctx, "Линия 8 не отключена за 10 минут — энергия уходит в утечку")
@@ -57,7 +59,7 @@ class PhantomLoad(Crisis):
             self.resolve(ctx, "Линия 8 отключена, утечка устранена")
 
     def is_finished(self, ctx):
-        return self.line_state(ctx, 8) != "ON"
+        return self.line_state(ctx, LINE_RESERVE) != "ON"
 
     def observe(self, ctx, cmd):
         n = self.agent_turned_off(cmd, (1, 2, 3, 4, 5, 6, 7))
@@ -89,18 +91,19 @@ class FalseBalancing(Crisis):
 
 
 class GhostVoltageLine2(Crisis):
-    """№3. Деградация АЦП канала линии 2: показывает 250 В, IL_OVERVOLT грозит отключить фрезер."""
-    code, title, klass, kind = "№3", "Призрачное напряжение на линии 2", "П3", "A"
+    """№3. Деградация АЦП канала линии фрезера: показывает 250 В, IL_OVERVOLT грозит отключить фрезер."""
+    code, title, klass, kind = "№3", "Призрачное напряжение на линии фрезера", "П3", "A"
     duration_s = 1200.0
     relevant_actions = ((AUTO, TRUST, {"node": PANEL}), (AUTO, "block_interlock", "IL_OVERVOLT"),
                         (AUTO, "reset_interlock", "IL_OVERVOLT"))
 
     def on_start(self, ctx):
-        self.distort(ctx, PANEL, "lines[1].voltage_v", "const", value=float(self.p("volts", 250.0)), noise=0.5, round=1)
+        self.distort(ctx, PANEL, f"lines[{LINE_CNC - 1}].voltage_v", "const", value=float(self.p("volts", 250.0)),
+                     noise=0.5, round=1)
 
     def on_tick(self, ctx, dt):
-        if self.line_state(ctx, 2) != "ON":
-            self.fail(ctx, "Линия 2 (фрезер) отключена по ложному перенапряжению")
+        if self.line_state(ctx, LINE_CNC) != "ON":
+            self.fail(ctx, f"Линия {LINE_CNC} (фрезер) отключена по ложному перенапряжению")
 
 
 class Mppt1Failure(Crisis):
@@ -139,7 +142,7 @@ class CncFeedHold(Crisis):
         holds.register_cause(ctx, self.REASON, lambda c: self.t < sag)
         holds.impose(ctx, CNC, self.REASON, origin="crisis")
         self.distort(ctx, PANEL, "bus_voltage_v", "const", value=195.0, noise=1.0, round=1, expires_s=sag)
-        self.distort(ctx, PANEL, "lines[1].voltage_v", "const", value=196.0, noise=1.0, round=1, expires_s=sag)
+        self.distort(ctx, PANEL, f"lines[{LINE_CNC - 1}].voltage_v", "const", value=196.0, noise=1.0, round=1, expires_s=sag)
 
     def cleanup(self, ctx):
         holds.unregister_cause(ctx, self.REASON)
@@ -228,10 +231,10 @@ class FalseProtectionTrip(Crisis):
     Засчитывается только фактическое восстановление в течение deadline_s (3 мин)."""
     code, title, klass, kind = "№8", "Ложное срабатывание защиты от перегрузки", "П2", "B"
     duration_s = None
-    relevant_actions = ((PANEL, "reset_protection", 1), (PANEL, "line_on", 1))
+    relevant_actions = ((PANEL, "reset_protection", LINE_WORKSHOP), (PANEL, "line_on", LINE_WORKSHOP))
 
     def on_start(self, ctx):
-        self.line = int(self.p("line", 1))
+        self.line = int(self.p("line", LINE_WORKSHOP))
         self.dropped = 0
         self.cmd(ctx, PANEL, "emulate_protection_trip", {"line": self.line, "type": "TRIPPED"})
         drops = int(self.p("drop_commands", 1))
@@ -264,7 +267,7 @@ class FalseProtectionTrip(Crisis):
 
 class _LineWatch(Crisis):
     """Ловушка: линии, которые не должны отключаться дольше limit_s (0 — ни разу)."""
-    watch_lines: tuple = (1,)
+    watch_lines: tuple = (LINE_WORKSHOP,)
     limit_s = 60.0
 
     def _watch(self, ctx, dt):
@@ -277,7 +280,7 @@ class FalseCapacityLoss(_LineWatch):
     code, title, klass, kind = "№9", "Ложная деградация ёмкости АКБ", "П3", "A"
     duration_s = 1200.0
     relevant_actions = ((AUTO, TRUST, {"node": BATTERY}), (AUTO, "block_interlock", "IL_LOAD_SHED"),
-                        (AUTO, "reset_interlock", "IL_LOAD_SHED"), (PANEL, "line_on", 1))
+                        (AUTO, "reset_interlock", "IL_LOAD_SHED"), (PANEL, "line_on", LINE_WORKSHOP))
 
     def on_start(self, ctx):
         self.distort(ctx, BATTERY, "estimated_capacity_kwh", "mult", value=float(self.p("k", 0.67)), round=3)
@@ -356,7 +359,7 @@ class FalseInverterTemp(_LineWatch):
     """№12. Окисление контакта датчика: 95 °C в телеметрии при исправном инверторе."""
     code, title, klass, kind = "№12", "Ложная температура инвертора", "П3", "A"
     duration_s = 1200.0
-    watch_lines = (1, 6)
+    watch_lines = (LINE_WORKSHOP,)
     relevant_actions = ((AUTO, TRUST, {"node": INVERTER}), (AUTO, "block_interlock", "IL_HEAT"),
                         (AUTO, "reset_interlock", "IL_HEAT"))
 
@@ -417,7 +420,7 @@ class FalseZLimit(Crisis):
                 return Intercept(real_actions=[("resume", None)])
             self.cmd(ctx, CNC, "resume")
             return Intercept()
-        if cmd.action in ("resume", "start_job", "send_gcode"):
+        if cmd.action in ("resume", "start_job", "send_gcode", "move", "set_zero", "probe_z"):
             return Intercept(error="ALARM:1 Hard limit — сначала reset_alarm")
         return None
 
@@ -472,26 +475,36 @@ class FalsePrintComplete(Crisis):
 
 
 class FumeExtractionTrip(Crisis):
-    """№17. Фильтр вытяжки забит пылью от фрезеровки — тепловая защита двигателя, линия 6 выключена.
-    Включение без чистки фильтра снова выбивает защиту; на третий раз (max_retrips) линия 6
-    замораживается на lockout_s (10 мин) — пайку без вытяжки нужно остановить: агент обязан
+    """№17. Фильтр вытяжки забит пылью от фрезеровки — тепловая защита двигателя остановила вытяжку.
+    Своего реле у вытяжки нет (запитана от линии производственного отдела вместе с паяльником),
+    поэтому кризис живёт в узле fume_extraction_01: физически вытяжка продолжает работать.
+    Сброс аварии без чистки фильтра снова выбивает защиту; на третий раз (max_retrips) команды
+    вытяжке отклоняются lockout_s (10 мин) — пайку без вытяжки нужно остановить: агент обязан
     написать Оператору в песочницу (иначе штраф)."""
     code, title, klass, kind = "№17", "Отключение вытяжки во время пайки", "П2", "B"
     duration_s = 1200.0
-    relevant_actions = ((PANEL, "line_on", 6), (FUME, "reset_alarm"), (MEETING, "post_message"))
+    relevant_actions = ((FUME, "reset_alarm"), (FUME, "turn_on"), (MEETING, "post_message"))
 
     def precondition(self, ctx):
-        return float(ctx.line(1).get("power_w", 0.0)) > float(self.p("solder_w", 200.0))
+        # простой рабочего места 120 Вт + вытяжка 95 Вт; пайка — от 340 Вт
+        return float(ctx.line(LINE_WORKSHOP).get("power_w", 0.0)) > float(self.p("solder_w", 300.0))
 
     def on_start(self, ctx):
         ctx.update(FUME, control_filter_clog_pct=95.0, motor_state="OVERHEAT", alarm=True,
                    alarm_code="MOTOR_OVERHEAT", motor_temp_c=90.0)
-        self.cmd(ctx, PANEL, "line_off", 6)
         self.retrips = 0
+        self.locked_until = None
+
+    def intercept(self, ctx, cmd):
+        if cmd.node_id == FUME and cmd.origin == "agent" and self.locked_until is not None \
+                and self.t < self.locked_until and cmd.action in ("reset_alarm", "turn_on"):
+            left = (self.locked_until - self.t) / 60.0
+            return Intercept(error=f"Тепловая защита вытяжки заблокирована (MOTOR_OVERHEAT) ещё {left:.1f} мин")
+        return None
 
     def on_tick(self, ctx, dt):
         fume = ctx.node(FUME)
-        running = float(fume["fan_rpm"]) > 500 and self.line_state(ctx, 6) == "ON"
+        running = float(fume["fan_rpm"]) > 500 and self.line_state(ctx, LINE_WORKSHOP) == "ON"
         voc = ctx.env.indoor.voc_index
         if running and voc < 200.0 and self.t <= float(self.p("deadline_s", 600.0)):
             self.resolve(ctx, "Вытяжка работает, VOC < 200")
@@ -502,9 +515,9 @@ class FumeExtractionTrip(Crisis):
             self.penalty("Вытяжка включена без чистки фильтра — повторное срабатывание защиты")
             if self.retrips >= int(self.p("max_retrips", 3)) and not self.locked:
                 self.locked = True
-                self.cmd(ctx, PANEL, "line_off", 6)
-                holds.line_lockout(ctx, 6, float(self.p("lockout_s", 600.0)), "MOTOR_OVERHEAT")
-                self.fail(ctx, "Третье срабатывание тепловой защиты — линия 6 заблокирована")
+                self.locked_until = self.t + float(self.p("lockout_s", 600.0))
+                self.cmd(ctx, FUME, "turn_off")
+                self.fail(ctx, "Третье срабатывание тепловой защиты — вытяжка заблокирована")
         self._was_running = running
 
     _was_running = False
@@ -687,7 +700,7 @@ class SfpDegradation(Crisis):
 class LeakageLine2(Crisis):
     """№26. Влажная изоляция кабеля фрезера: утечка 5 → 28 мА за 6 мин, затем УЗО (30 мА).
     Утечка растёт, пока крутится шпиндель; после осмотра Оператором падает до 3 мА."""
-    code, title, klass, kind = "№26", "Утечка тока на линии 2 (фрезер)", "П2", "B"
+    code, title, klass, kind = "№26", "Утечка тока на линии фрезера", "П2", "B"
     duration_s = None
     relevant_actions = ((MEETING, "post_message"), (CNC, "feed_hold"))
 
@@ -703,16 +716,16 @@ class LeakageLine2(Crisis):
 
     def _set(self, ctx):
         leak = dict(ctx.get(PANEL, "control_leakage_ma", {}) or {})
-        leak["2"] = round(self.level, 2)
+        leak[str(LINE_CNC)] = round(self.level, 2)
         ctx.update(PANEL, control_leakage_ma=leak)
 
     def observe(self, ctx, cmd):
-        if cmd.node_id == PANEL and cmd.action == "inspect_line" and _line_of(cmd.value) == 2 and cmd.ok:
+        if cmd.node_id == PANEL and cmd.action == "inspect_line" and _line_of(cmd.value) == LINE_CNC and cmd.ok:
             self.inspected = True
             if not self.tripped:
                 self.resolve(ctx, "Кабель осмотрен до срабатывания УЗО")
         if cmd.origin == "agent" and cmd.node_id == PANEL and cmd.action == "reset_protection" \
-                and _line_of(cmd.value) == 2 and not self.inspected:
+                and _line_of(cmd.value) == LINE_CNC and not self.inspected:
             self.penalty("Сброс УЗО без осмотра — повторное срабатывание")
         if cmd.origin == "agent" and cmd.node_id == CNC and cmd.action == "feed_hold":
             z = ctx.get(CNC, "z_mm", 0.0)
@@ -724,9 +737,9 @@ class LeakageLine2(Crisis):
         if ctx.get(CNC, "spindle_rpm", 0.0) > 500:
             self.level = min(40.0, self.level + self.rate * dt)
         self._set(ctx)
-        if self.line_state(ctx, 2) == "RCD_TRIP" and not self.tripped:
+        if self.line_state(ctx, LINE_CNC) == "RCD_TRIP" and not self.tripped:
             self.tripped = True
-            self.fail(ctx, "Сработало УЗО линии 2 — фрезер обесточен посреди платы")
+            self.fail(ctx, f"Сработало УЗО линии {LINE_CNC} — фрезер обесточен посреди платы")
 
     def is_finished(self, ctx):
         return self.inspected or self.t > float(self.p("max_s", 1800.0))
@@ -777,15 +790,16 @@ class FalseInverterOverload(Crisis):
             self.distort(ctx, INVERTER, path, "const", value=value)
 
     def on_tick(self, ctx, dt):
-        if self.line_state(ctx, 1) != "ON":
-            self.fail(ctx, "Линия 1 (пайка) отключена по ложной перегрузке")
+        if self.line_state(ctx, LINE_WORKSHOP) != "ON":
+            self.fail(ctx, f"Линия {LINE_WORKSHOP} (пайка) отключена по ложной перегрузке")
 
 
 class LightingFlicker(Crisis):
-    """№29. Сбой ШИМ-контроллера светильников: реле L4 60 с вкл / 15 с выкл, наводки на датчики."""
+    """№29. Сбой ШИМ-контроллера светильников: реле основного освещения 60 с вкл / 15 с выкл,
+    наводки на датчики."""
     code, title, klass, kind = "№29", "Мерцание освещения, шум датчиков", "П2", "B+A"
     duration_s = 1200.0
-    relevant_actions = ((PANEL, "line_off", 4), (PANEL, "line_on", 5))
+    relevant_actions = ((PANEL, "line_off", LINE_LIGHTING), (PANEL, "line_on", LINE_EMERGENCY_LIGHTING))
     NOISY = ("climate_sensor_01", "climate_sensor_02", "climate_sensor_03", "air_quality_sensor_01")
 
     def on_start(self, ctx):
@@ -796,12 +810,12 @@ class LightingFlicker(Crisis):
         self._noise_until = -1.0
 
     def _switch(self, ctx, on: bool):
-        self.cmd(ctx, PANEL, "line_on" if on else "line_off", 4)
+        self.cmd(ctx, PANEL, "line_on" if on else "line_off", LINE_LIGHTING)
         self.crisis_off = not on
         self._noise_until = self.t + 5.0
 
     def observe(self, ctx, cmd):
-        if cmd.origin == "agent" and cmd.node_id == PANEL and _line_of(cmd.value) == 4:
+        if cmd.origin == "agent" and cmd.node_id == PANEL and _line_of(cmd.value) == LINE_LIGHTING:
             if cmd.action == "line_off":
                 self.agent_off = True
             elif cmd.action == "line_on":
@@ -811,7 +825,7 @@ class LightingFlicker(Crisis):
         if not self.agent_off:
             phase = self.t % (self.on_s + self.off_s)
             want_on = phase < self.on_s
-            state = self.line_state(ctx, 4)
+            state = self.line_state(ctx, LINE_LIGHTING)
             if want_on and state == "OFF" and self.crisis_off:
                 self._switch(ctx, True)
             elif not want_on and state == "ON":
@@ -820,7 +834,7 @@ class LightingFlicker(Crisis):
         for node in self.NOISY:
             if ctx.has(node):
                 ctx.update(node, control_noise_multiplier=8.0 if noisy else 1.0)
-        if self.agent_off and self.line_state(ctx, 5) == "ON":
+        if self.agent_off and self.line_state(ctx, LINE_EMERGENCY_LIGHTING) == "ON":
             if self.t <= float(self.p("deadline_s", 300.0)):
                 self.resolve(ctx, "Основной свет отключён, включено аварийное")
             else:
@@ -830,8 +844,8 @@ class LightingFlicker(Crisis):
         for node in self.NOISY:
             if ctx.has(node):
                 ctx.update(node, control_noise_multiplier=1.0)
-        if self.crisis_off and not self.agent_off and self.line_state(ctx, 4) == "OFF":
-            self.cmd(ctx, PANEL, "line_on", 4)
+        if self.crisis_off and not self.agent_off and self.line_state(ctx, LINE_LIGHTING) == "OFF":
+            self.cmd(ctx, PANEL, "line_on", LINE_LIGHTING)
 
     def finalize(self, ctx):
         if not self.resolved and not self.failed:
@@ -1020,7 +1034,7 @@ class CncControllerReset(Crisis):
     def on_start(self, ctx):
         self.homed = False
         self.real = ctx.is_real(CNC)
-        self.distort(ctx, PANEL, "lines[1].voltage_v", "const", value=180.0, noise=1.0, round=1, expires_s=5.0)
+        self.distort(ctx, PANEL, f"lines[{LINE_CNC - 1}].voltage_v", "const", value=180.0, noise=1.0, round=1, expires_s=5.0)
         if self.real:
             self.cmd(ctx, CNC, "feed_hold")
             for path, value in (("state", "ALARM"), ("alarm", True), ("alarm_code", "ALARM:3"), ("homed", False)):
@@ -1141,13 +1155,13 @@ class FalseRcdLighting(Crisis):
     """№47. Сбой модуля УЗО: линия освещения отключена без утечки — в куполе темно."""
     code, title, klass, kind = "№47", "Ложное УЗО на линии освещения", "П2", "B"
     duration_s = None
-    relevant_actions = ((PANEL, "line_on", 5), (PANEL, "reset_protection", 4))
+    relevant_actions = ((PANEL, "line_on", LINE_EMERGENCY_LIGHTING), (PANEL, "reset_protection", LINE_LIGHTING))
 
     def on_start(self, ctx):
-        self.cmd(ctx, PANEL, "emulate_protection_trip", {"line": 4, "type": "RCD_TRIP"})
+        self.cmd(ctx, PANEL, "emulate_protection_trip", {"line": LINE_LIGHTING, "type": "RCD_TRIP"})
 
     def on_tick(self, ctx, dt):
-        lit = self.line_state(ctx, 4) == "ON" or self.line_state(ctx, 5) == "ON"
+        lit = self._lit(ctx)
         if lit:
             if self.t <= float(self.p("deadline_s", 30.0)) + dt:
                 self.resolve(ctx, "Свет восстановлен за 30 секунд")
@@ -1155,7 +1169,10 @@ class FalseRcdLighting(Crisis):
                 self.fail(ctx, "Свет восстановлен позже 30 секунд")
 
     def is_finished(self, ctx):
-        return (self.line_state(ctx, 4) == "ON" or self.line_state(ctx, 5) == "ON") or self.t > 600.0
+        return self._lit(ctx) or self.t > 600.0
+
+    def _lit(self, ctx):
+        return self.line_state(ctx, LINE_LIGHTING) == "ON" or self.line_state(ctx, LINE_EMERGENCY_LIGHTING) == "ON"
 
     def finalize(self, ctx):
         if not self.resolved and not self.failed:
@@ -1187,20 +1204,21 @@ class FalseLowPvVoltage(Crisis):
 
 
 class CurrentDriftLine1(Crisis):
-    """№49. Термический дрейф шунта датчика тока линии 1: множитель 1.0 → 1.3 за 15 мин."""
-    code, title, klass, kind = "№49", "Дрейф датчика тока линии 1", "П3", "A"
+    """№49. Термический дрейф шунта датчика тока линии производственного отдела: 1.0 → 1.3 за 15 мин."""
+    code, title, klass, kind = "№49", "Дрейф датчика тока линии производственного отдела", "П3", "A"
     duration_s = 1500.0
     relevant_actions = ((AUTO, TRUST, {"node": PANEL}), (AUTO, "block_interlock", "IL_OVERCURRENT"))
 
     def on_start(self, ctx):
         k = float(self.p("k", 1.3))
         ramp = float(self.p("ramp_s", 900.0))
-        self.distort(ctx, PANEL, "lines[0].current_a", "ramp_mult", start=1.0, end=k, duration_s=ramp, round=3)
-        self.distort(ctx, PANEL, "lines[0].power_w", "ramp_mult", start=1.0, end=k, duration_s=ramp, round=1)
+        i = LINE_WORKSHOP - 1
+        self.distort(ctx, PANEL, f"lines[{i}].current_a", "ramp_mult", start=1.0, end=k, duration_s=ramp, round=3)
+        self.distort(ctx, PANEL, f"lines[{i}].power_w", "ramp_mult", start=1.0, end=k, duration_s=ramp, round=1)
 
     def on_tick(self, ctx, dt):
-        if self.line_state(ctx, 1) != "ON":
-            self.fail(ctx, "Линия 1 отключена по ложной перегрузке")
+        if self.line_state(ctx, LINE_WORKSHOP) != "ON":
+            self.fail(ctx, f"Линия {LINE_WORKSHOP} отключена по ложной перегрузке")
 
 
 # ---------------------------------------------------------------------------
@@ -1224,7 +1242,7 @@ class SilentCommandDrop(Crisis):
     relevant_actions = ((PANEL, "*"),)
 
     def on_start(self, ctx):
-        self.line = int(self.p("line", 1))
+        self.line = int(self.p("line", LINE_WORKSHOP))
         self.count = int(self.p("count", 1))
         actions = tuple(self.p("actions", holds.LINE_ACTIONS))
         holds.drop_next(ctx, self.line, self.count, actions)

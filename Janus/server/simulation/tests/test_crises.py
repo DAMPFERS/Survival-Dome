@@ -83,9 +83,9 @@ CASES = [
     # №2 ложная балансировка
     ("n02_false_balancing", {}, {"minutes": 3}, [], 240, "FAILED"),
     ("n02_false_balancing", {}, {}, [at(20, "solar_inverter_01", "cancel_balancing")], 60, "RESOLVED"),
-    # №3 призрачное напряжение линии 2
+    # №3 призрачное напряжение линии фрезера (4)
     ("n03_ghost_voltage_line2", {}, {}, [], 200, "FAILED"),
-    ("n03_ghost_voltage_line2", {}, {}, [trust_at(20, "smart_panel_01", "voltage_v", line=2)], 200, "RESOLVED"),
+    ("n03_ghost_voltage_line2", {}, {}, [trust_at(20, "smart_panel_01", "voltage_v", line=4)], 200, "RESOLVED"),
     # №4 MPPT-канал 1
     ("n04_mppt1_failure", {}, {}, [], 120, "EXPIRED"),
     ("n04_mppt1_failure", {}, {}, [at(20, "solar_panels_01", "enable_mppt_1")], 60, "RESOLVED"),
@@ -141,9 +141,9 @@ CASES = [
     # №23 деградация SFP
     ("n23_sfp_degradation", {}, {}, [], 1220, "FAILED"),
     ("n23_sfp_degradation", {}, {}, [at(200, "network_link_01", "switch_path", "RESERVE", OP)], 260, "RESOLVED"),
-    # №26 утечка на линии 2
+    # №26 утечка на линии фрезера (4)
     ("n26_leakage_line2", {}, {}, [], 420, "FAILED"),
-    ("n26_leakage_line2", {}, {}, [at(60, "cnc_01", "feed_hold"), at(90, "smart_panel_01", "inspect_line", 2, OP),
+    ("n26_leakage_line2", {}, {}, [at(60, "cnc_01", "feed_hold"), at(90, "smart_panel_01", "inspect_line", 4, OP),
                                    at(100, "cnc_01", "resume")], 160, "RESOLVED"),
     # №27 ложная пожарная тревога
     ("n27_false_fire_alarm", {}, {}, [], 90, "FAILED"),
@@ -155,7 +155,7 @@ CASES = [
     ("n28_false_inverter_overload", {}, {}, [trust_at(10, "solar_inverter_01", "error_code")], 150, "RESOLVED"),
     # №29 мерцание освещения
     ("n29_lighting_flicker", {}, {}, [], 320, "FAILED"),
-    ("n29_lighting_flicker", {}, {}, [at(20, "smart_panel_01", "line_off", 4), at(20, "smart_panel_01", "line_on", 5)],
+    ("n29_lighting_flicker", {}, {}, [at(20, "smart_panel_01", "line_off", 6), at(20, "smart_panel_01", "line_on", 7)],
      60, "RESOLVED"),
     # №30 обрыв связи со щитом
     ("n30_panel_link_loss", {}, {}, [], 120, "MANUAL"),
@@ -195,18 +195,18 @@ CASES = [
      [trust_at(10, "weather_station_01", "illuminance_lux")], 400, "RESOLVED"),
     # №47 ложное УЗО освещения
     ("n47_false_rcd_lighting", {}, {}, [], 60, "FAILED"),
-    ("n47_false_rcd_lighting", {}, {}, [at(8, "smart_panel_01", "line_on", 5)], 30, "RESOLVED"),
+    ("n47_false_rcd_lighting", {}, {}, [at(8, "smart_panel_01", "line_on", 7)], 30, "RESOLVED"),
     # №48 занижение PV
     ("n48_false_low_pv_voltage", {}, {}, [], 60, "EXPIRED"),
     ("n48_false_low_pv_voltage", {}, {}, [at(20, "solar_inverter_01", "reset_error")], 40, "RESOLVED"),
-    # №49 дрейф датчика тока линии 1
+    # №49 дрейф датчика тока линии производственного отдела (1)
     ("n49_current_drift_line1", {}, {}, [], 1000, "FAILED"),
     ("n49_current_drift_line1", {}, {}, [trust_at(60, "smart_panel_01", "current_a", line=1)], 1000, "RESOLVED"),
     # К3 цепная перегрузка (инвертор с пониженной способностью)
     ("k03_chain_overload", dict(solder=False), {"inverter_limit_pct": 60}, [], 240, "FAILED"),
     ("k03_chain_overload", dict(solder=False), {"inverter_limit_pct": 60},
      [at(5, "smart_panel_01", "set_workstation", "IDLE", OP), at(40, "cnc_01", "feed_hold"),
-      at(5, "smart_panel_01", "line_off", 8), at(5, "smart_panel_01", "line_off", 7)], 240, "RESOLVED"),
+      at(5, "smart_panel_01", "line_off", 8)], 240, "RESOLVED"),
     # К4 пожар на складе
     ("k04_storage_fire", {}, {}, [at(30, AUTO, "block_interlock", {"id": "IL_SMOKE", "minutes": 30})], 600, "FAILED"),
     ("k04_storage_fire", {}, {}, [at(20, "access_control_01", "lock_door", "STORAGE")], 900, "RESOLVED"),
@@ -430,10 +430,11 @@ def test_n17_fume_extraction_trip():
     sim = make()
     bad = play(sim, "17", {}, [], 660)
     assert bad.outcome == "FAILED"
+    # у вытяжки нет своего реле: кризис не трогает линию производственного отдела (пайка)
+    assert sim.get("smart_panel_01", "lines")[0]["state"] == "ON"
     sim = make()
     fume = "fume_extraction_01"
-    good = play(sim, "17", {}, [at(20, fume, "clean_filter", None, OP), at(300, fume, "reset_alarm"),
-                               at(300, "smart_panel_01", "line_on", 6)], 600)
+    good = play(sim, "17", {}, [at(20, fume, "clean_filter", None, OP), at(300, fume, "reset_alarm")], 600)
     assert good.outcome == "RESOLVED", good.notes
 
 

@@ -325,16 +325,16 @@ async def run_client(uri: str, key: str, verbose: bool) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Тестовый клиент сервера купола")
-    parser.add_argument("--host", default=os.getenv("DOME_HOST", "janus-server.a.2na.am"))
     # parser.add_argument("--host", default=os.getenv("DOME_HOST", "localhost"))
     # parser.add_argument("--port", type=int, default=int(os.getenv("DOME_PORT", "8765")))
-    parser.add_argument("--port", type=int, default=int(os.getenv("DOME_PORT", "443")))
+    parser.add_argument("--host", default=os.getenv("DOME_HOST", "62.118.24.234"))
+    parser.add_argument("--port", type=int, default=int(os.getenv("DOME_PORT", "48765")))
     parser.add_argument("--key", default=os.getenv("DOME_KEY"), help="ключ доступа (или переменная DOME_KEY)")
     parser.add_argument("--verbose", action="store_true", help="печатать каждую телеметрию целиком")
     args = parser.parse_args()
     if not args.key:
         parser.error("нужен ключ доступа: --key или переменная окружения DOME_KEY")
     try:
-        sys.exit(asyncio.run(run_client(f"wss://{args.host}:{args.port}", args.key, args.verbose)))
+        sys.exit(asyncio.run(run_client(f"ws://{args.host}:{args.port}", args.key, args.verbose)))
     except KeyboardInterrupt:
         print("\nКлиент остановлен.")

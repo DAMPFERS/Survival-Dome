@@ -1098,32 +1098,51 @@ def _load_emergency(hour: float) -> float:
     return 12.0  # светильники аварийного освещения + подзаряд их аккумуляторов
 
 
-def _load_fume(hour: float) -> float:
-    return 95.0 if 9 <= hour < 19 else 0.0
+def _load_greenhouse_fablab(hour: float) -> float:
+    return 20.0  # 6 вентиляторов, контроллер и датчики стенда (оценка, в режиме real меряет реле)
+
+
+def _load_greenhouse_chemlab(hour: float) -> float:
+    return 15.0  # 2 вентилятора Arduino, релейный вентилятор, контроллер (оценка)
 
 
 def _load_none(hour: float) -> float:
     return 0.0
 
 
+# Номера линий щитка = номера реле L1..L8 (smart_rele/smart_devices.py). Кризисы, правила
+# и автоматика ссылаются на линии только через эти константы: при перекоммутации нагрузок
+# на площадке достаточно поменять их и PANEL_LINES.
+LINE_WORKSHOP = 1             # производственный отдел: рабочее место Оператора + вытяжка FabLab
+LINE_GREENHOUSE_FABLAB = 2    # теплица ФабЛаб (МС-ТЮК)
+LINE_PRINTER = 3
+LINE_CNC = 4
+LINE_GREENHOUSE_CHEMLAB = 5   # теплица Химлаб (МС-ТЮК)
+LINE_LIGHTING = 6
+LINE_EMERGENCY_LIGHTING = 7
+LINE_RESERVE = 8              # резерв, фантомное потребление (№1)
+
 # (номер, назначение, номинал автомата, А, профиль нагрузки, Вт, включена при старте)
 PANEL_LINES = [
-    (1, "Производственный отдел", 16.0, _load_production, True),
-    (2, "ЧПУ-фрезер", 10.0, _load_cnc, True),
-    (3, "3D-принтер", 10.0, _load_printer, True),
-    (4, "Обычное освещение", 10.0, _load_lighting, True),
-    (5, "Аварийное освещение", 6.0, _load_emergency, False),
-    (6, "Вытяжка FabLab", 10.0, _load_fume, True),
-    (7, "Резервная линия", 16.0, _load_none, True),
-    (8, "Резервная линия / фантомное потребление", 16.0, _load_none, True),
+    (LINE_WORKSHOP, "Производственный отдел (рабочее место, вытяжка FabLab)", 16.0, _load_production, True),
+    (LINE_GREENHOUSE_FABLAB, "Теплица ФабЛаб", 10.0, _load_greenhouse_fablab, True),
+    (LINE_PRINTER, "3D-принтер", 10.0, _load_printer, True),
+    (LINE_CNC, "ЧПУ-фрезер", 10.0, _load_cnc, True),
+    (LINE_GREENHOUSE_CHEMLAB, "Теплица Химлаб", 10.0, _load_greenhouse_chemlab, True),
+    (LINE_LIGHTING, "Обычное освещение", 10.0, _load_lighting, True),
+    (LINE_EMERGENCY_LIGHTING, "Аварийное освещение", 6.0, _load_emergency, False),
+    (LINE_RESERVE, "Резервная линия / фантомное потребление", 16.0, _load_none, True),
 ]
+assert [n for n, *_ in PANEL_LINES] == list(range(1, 9)), "PANEL_LINES: линии 1..8 по порядку"
 
 LINE_ON, LINE_OFF, LINE_TRIPPED, LINE_RCD_TRIP = "ON", "OFF", "TRIPPED", "RCD_TRIP"
 
-# Рабочее место «Производственный отдел» (линия 1): что делает Оператор
+# Рабочее место «Производственный отдел» (линия LINE_WORKSHOP): что делает Оператор
 WORKSTATION_LOAD_W = {"IDLE": 120.0, "SOLDERING": 340.0, "HOT_AIR": 760.0, "OFF": 0.0}
-# Пусковые токи при подаче питания: линия -> множитель (свет, двигатели, БП, нагреватели)
-INRUSH_K = {1: 2.0, 2: 2.0, 3: 2.2, 4: 3.0, 5: 1.5, 6: 4.0, 7: 1.0, 8: 1.0}
+# Пусковые токи при подаче питания: линия -> множитель (свет, двигатели, БП, нагреватели).
+# Производственный отдел: рабочее место ×2 и двигатель вытяжки ×4 — в среднем по нагрузке ≈ 2.4
+INRUSH_K = {LINE_WORKSHOP: 2.4, LINE_GREENHOUSE_FABLAB: 1.2, LINE_PRINTER: 2.2, LINE_CNC: 2.0,
+            LINE_GREENHOUSE_CHEMLAB: 1.2, LINE_LIGHTING: 3.0, LINE_EMERGENCY_LIGHTING: 1.5, LINE_RESERVE: 1.0}
 INRUSH_S = 8.0
 RCD_THRESHOLD_MA = 30.0
 
@@ -1134,20 +1153,22 @@ class SmartPanel(SandboxNode):
     Щиток на 8 линий. Телеметрия линий — список `lines` (индекс 0 = линия 1).
 
     Входы для правил и кризисов:
-        control_line_loads_w: {"2": 250.0, ...} — фактическая нагрузка линии
-            (от ЧПУ, принтера, вытяжки); линии без записи используют профиль;
-        control_phantom_load_w: добавочная «фантомная» нагрузка на линию 8 (№1);
+        control_line_loads_w: {"4": 250.0, ...} — фактическая нагрузка линии
+            (от ЧПУ, принтера); линии без записи используют профиль;
+        control_line_extra_w: {"1": 95.0} — добавка к нагрузке линии поверх профиля или
+            рабочего места (вытяжка FabLab на линии производственного отдела);
+        control_phantom_load_w: добавочная «фантомная» нагрузка на резервную линию (№1);
         control_bus_powered: есть ли напряжение на выходе инвертора (Д19);
         control_bus_voltage_v: напряжение выхода инвертора;
-        control_leakage_ma: {"2": 12.0} — ток утечки линии (Д15, №26); при ≥ 30 мА — УЗО;
-        control_workstation: что делает Оператор на рабочем месте линии 1
+        control_leakage_ma: {"4": 12.0} — ток утечки линии (Д15, №26); при ≥ 30 мА — УЗО;
+        control_workstation: что делает Оператор на рабочем месте линии LINE_WORKSHOP
             (IDLE | SOLDERING | HOT_AIR | OFF; None — суточный профиль);
         control_command_drop: {"1": {"actions": [...], "count": N}} — тихий дроп
             ближайших команд агента линии (№24, holds.py).
 
     Заморозка линии (holds.py): lines[i].lockout_remaining_s > 0 — реле не реагирует,
     команды линии отклоняются (lockout_reason: CHATTER — больше 3 переключений агентом
-    за 2 мин; MOTOR_OVERHEAT — №17).
+    за 2 мин).
 
     Пусковые токи: при подаче напряжения на шину (после блэкаута) все включённые
     линии 8 с потребляют с множителем INRUSH_K; при включении одной линии — только она.
@@ -1191,6 +1212,7 @@ class SmartPanel(SandboxNode):
             "total_current_a": 0.0,
             "lines_on_count": sum(1 for l in lines if l["state"] == LINE_ON),
             "control_line_loads_w": {},
+            "control_line_extra_w": {},
             "control_phantom_load_w": 0.0,
             "control_bus_powered": True,
             "control_bus_voltage_v": None,
@@ -1203,11 +1225,12 @@ class SmartPanel(SandboxNode):
         overrides = node.get("control_line_loads_w") or {}
         if str(number) in overrides:
             demand = float(overrides[str(number)])
-        elif number == 1 and node.get("control_workstation"):
+        elif number == LINE_WORKSHOP and node.get("control_workstation"):
             demand = WORKSTATION_LOAD_W.get(node["control_workstation"], 120.0) * (0.97 + 0.03 * noise_k)
         else:
             demand = PANEL_LINES[number - 1][3](hour) * noise_k
-        if number == 8:
+        demand += float((node.get("control_line_extra_w") or {}).get(str(number), 0.0))
+        if number == LINE_RESERVE:
             demand += float(node.get("control_phantom_load_w") or 0.0)
         return max(0.0, demand)
 
