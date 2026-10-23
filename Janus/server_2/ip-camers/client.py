@@ -2,6 +2,7 @@
 """
 Клиент: 3 видеопотока + 1 аудио (выбор на лету)
 2×2 сетка, чёрный экран, авто-реконнект, PTS-синхронизация
+При обрыве связи сбрасывает кодеки, очереди и кадры
 """
 
 import av
@@ -61,6 +62,7 @@ class CameraClient:
 
         self.video_codecs: Dict[int, av.CodecContext] = {}
         self.audio_codecs: Dict[int, av.CodecContext] = {}
+        self.codec_lock = threading.Lock()
 
     # -------------------- Сеть --------------------
     def _connect(self) -> bool:
@@ -94,6 +96,31 @@ class CameraClient:
             except Exception:
                 return None
         return data
+
+    def _clear_queues(self):
+        """Очистка очередей от устаревших пакетов после обрыва."""
+        for q in self.video_queues.values():
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+        for q in self.audio_queues.values():
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+
+    def _reset_on_disconnect(self):
+        """Полный сброс состояния при потере связи."""
+        with self.codec_lock:
+            self.video_codecs.clear()
+            self.audio_codecs.clear()
+        self._clear_queues()
+        with self.frame_lock:
+            for i in range(3):
+                self.frames[i] = (BLACK.copy(), 0)
 
     def _receiver_loop(self):
         while not self.stop_event.is_set():
@@ -143,47 +170,59 @@ class CameraClient:
                     except Exception:
                         pass
                     self.sock = None
-                self.video_codecs.clear()
-                self.audio_codecs.clear()
+                self._reset_on_disconnect()
                 time.sleep(CLIENT_RECONNECT_DELAY)
 
     # -------------------- Кодеки --------------------
     def _init_video_codec(self, cam_id: int, extradata: bytes):
-        if cam_id in self.video_codecs:
-            return
-        for name in ("h264", "hevc", "h265"):
-            try:
-                ctx = av.CodecContext.create(name, "r")
-                ctx.extradata = extradata
+        with self.codec_lock:
+            # При повторном extradata (после reconnect) пересоздаём кодек
+            if cam_id in self.video_codecs:
                 try:
-                    ctx.open()
+                    self.video_codecs[cam_id].close()
                 except Exception:
                     pass
-                self.video_codecs[cam_id] = ctx
-                print(f"[Cam {cam_id}] Видео-кодек: {name} (extradata {len(extradata)} байт)")
-                return
-            except Exception:
-                continue
-        print(f"[Cam {cam_id}] Не удалось инициализировать видео-кодек")
+                del self.video_codecs[cam_id]
+
+            for name in ("h264", "hevc", "h265"):
+                try:
+                    ctx = av.CodecContext.create(name, "r")
+                    ctx.extradata = extradata
+                    try:
+                        ctx.open()
+                    except Exception:
+                        pass
+                    self.video_codecs[cam_id] = ctx
+                    print(f"[Cam {cam_id}] Видео-кодек: {name} (extradata {len(extradata)} байт)")
+                    return
+                except Exception:
+                    continue
+            print(f"[Cam {cam_id}] Не удалось инициализировать видео-кодек")
 
     def _init_audio_codec(self, cam_id: int, extradata: bytes):
-        if cam_id in self.audio_codecs:
-            return
-        for name in ("aac", "pcm_alaw", "pcm_mulaw", "opus", "mp3"):
-            try:
-                ctx = av.CodecContext.create(name, "r")
-                if extradata:
-                    ctx.extradata = extradata
+        with self.codec_lock:
+            if cam_id in self.audio_codecs:
                 try:
-                    ctx.open()
+                    self.audio_codecs[cam_id].close()
                 except Exception:
                     pass
-                self.audio_codecs[cam_id] = ctx
-                print(f"[Cam {cam_id}] Аудио-кодек: {name}")
-                return
-            except Exception:
-                continue
-        print(f"[Cam {cam_id}] Не удалось инициализировать аудио-кодек")
+                del self.audio_codecs[cam_id]
+
+            for name in ("aac", "pcm_alaw", "pcm_mulaw", "opus", "mp3"):
+                try:
+                    ctx = av.CodecContext.create(name, "r")
+                    if extradata:
+                        ctx.extradata = extradata
+                    try:
+                        ctx.open()
+                    except Exception:
+                        pass
+                    self.audio_codecs[cam_id] = ctx
+                    print(f"[Cam {cam_id}] Аудио-кодек: {name}")
+                    return
+                except Exception:
+                    continue
+            print(f"[Cam {cam_id}] Не удалось инициализировать аудио-кодек")
 
     # -------------------- Видео --------------------
     def _video_decoder_loop(self, cam_id: int):
@@ -194,7 +233,8 @@ class CameraClient:
             except queue.Empty:
                 continue
 
-            ctx = self.video_codecs.get(cam_id)
+            with self.codec_lock:
+                ctx = self.video_codecs.get(cam_id)
             if ctx is None:
                 continue
 
@@ -232,7 +272,8 @@ class CameraClient:
             except queue.Empty:
                 continue
 
-            ctx = self.audio_codecs.get(cam_id)
+            with self.codec_lock:
+                ctx = self.audio_codecs.get(cam_id)
             if ctx is None:
                 continue
 

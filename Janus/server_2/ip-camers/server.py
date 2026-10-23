@@ -2,6 +2,7 @@
 """
 Сервер трансляции 3 IP-камер → TCP-туннель
 Stream-copy + extradata + PTS + авто-реконнект
+При каждом новом клиенте повторно отправляет extradata
 """
 
 import av
@@ -42,6 +43,10 @@ class CameraWorker(threading.Thread):
         self._container = None
         self._video_extradata_sent = False
         self._audio_extradata_sent = False
+        # Храним extradata, чтобы переотправить при новом клиенте
+        self.video_extradata: Optional[bytes] = None
+        self.audio_extradata: Optional[bytes] = None
+        self.extradata_lock = threading.Lock()
 
     def _connect(self) -> bool:
         options = {
@@ -76,6 +81,13 @@ class CameraWorker(threading.Thread):
         data = bytes(stream.codec_context.extradata)
         if not data:
             return
+
+        with self.extradata_lock:
+            if stream_type == STREAM_VIDEO_EXTRADATA:
+                self.video_extradata = data
+            else:
+                self.audio_extradata = data
+
         try:
             self.packet_queue.put_nowait((self.cam_id, stream_type, data, 0))
             kind = "video" if stream_type == STREAM_VIDEO_EXTRADATA else "audio"
@@ -105,7 +117,7 @@ class CameraWorker(threading.Thread):
                     time.sleep(RECONNECT_DELAY)
                     continue
 
-                # Отправляем extradata один раз после подключения
+                # Отправляем extradata один раз после подключения к RTSP
                 if not self._video_extradata_sent:
                     self._send_extradata(video_stream, STREAM_VIDEO_EXTRADATA)
                     self._video_extradata_sent = True
@@ -165,12 +177,33 @@ class CameraServer:
         header = struct.pack(HEADER_FMT, cam_id, stream_type, len(data), pts)
         sock.sendall(header + data)
 
+    def _send_extradata_to_client(self, sock: socket.socket):
+        """При новом клиенте сразу отправляем сохранённый extradata по всем камерам."""
+        for worker in self.workers.values():
+            with worker.extradata_lock:
+                video_ed = worker.video_extradata
+                audio_ed = worker.audio_extradata
+
+            try:
+                if video_ed:
+                    self._send_packet(sock, worker.cam_id, STREAM_VIDEO_EXTRADATA, video_ed, 0)
+                    print(f"[Server] → Cam {worker.cam_id} video extradata ({len(video_ed)} байт)")
+                if audio_ed:
+                    self._send_packet(sock, worker.cam_id, STREAM_AUDIO_EXTRADATA, audio_ed, 0)
+                    print(f"[Server] → Cam {worker.cam_id} audio extradata ({len(audio_ed)} байт)")
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                print(f"[Server] Не удалось отправить extradata: {e}")
+                raise
+
     def _client_handler(self, sock: socket.socket, addr):
         print(f"Клиент подключился: {addr}")
         with self.client_lock:
             self.client_sock = sock
 
         try:
+            # Сразу отправляем extradata — клиент сможет инициализировать кодеки
+            self._send_extradata_to_client(sock)
+
             while not self.stop_event.is_set():
                 try:
                     cam_id, stream_type, data, pts = self.packet_queue.get(timeout=1.0)

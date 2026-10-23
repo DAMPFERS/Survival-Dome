@@ -368,7 +368,7 @@ class FabLabClient:
         
 if __name__ == "__main__":
     client = FabLabClient(
-    base_url="http://127.0.0.1:8000",
+    base_url="http://192.168.8.36:8000",
     poll_interval=3.0,
     timeout=45.0
     )
@@ -377,7 +377,8 @@ if __name__ == "__main__":
 
     try:
         # Ждем пока накопятся данные
-        time.sleep(5)
+        time.sleep(3)
+        print(f"Подключен: {client.is_connected()}")
         
         # Чтение данных из кэша
         temp = client.get_value('temp', 0)
@@ -390,16 +391,21 @@ if __name__ == "__main__":
         print(f"Пыль: {dust}")
         
         # Управление
-        client.set_pwm(2, 150)
+        client.set_pwm(0, 255)
+        client.set_pwm(1, 255)
+        client.set_pwm(2, 255)
+        client.set_pwm(3, 255)
+        client.set_pwm(4, 255)
+        client.set_pwm(5, 255)
         client.set_door_lock(0, True)
+        client.set_door_lock(1, True)
         client.set_vacuum(1)
-        client.set_mode(2, 4)  # Включаем режим неисправности для вентилятора 4
+        # client.set_mode(2, 4)  # Включаем режим неисправности для вентилятора 4
         
         # Проверка состояния
-        print(f"Подключен: {client.is_connected()}")
         
         # Работаем дальше...
-        time.sleep(10)
+        time.sleep(4)
         
     finally:
         # Остановка
