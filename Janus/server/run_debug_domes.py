@@ -36,6 +36,7 @@ def _env_for(team: int, port: int, workdir: Path) -> dict[str, str]:
         "DOME_ENERGY_MODE": "virtual",
         "DOME_MEETING_FILE": str(workdir / "history.jsonl"),
         "DOME_POLICY_FILE": str(workdir / "access_policy.json"),
+        "DOME_PARTICIPANT_LOG": str(workdir / "participant_log"),
     })
     return env
 

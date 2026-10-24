@@ -61,6 +61,12 @@ lockout_remaining_s в телеметрии принтера и фрезера. 
 (пауза станков, реле щита при блэкауте виртуальной энергосистемы — Д19)
 забираются из simulator.drain_real_commands() в цикле синхронизации.
 
+Журнал участника (logger/participant_log.py, DOME_PARTICIPANT_LOG, по умолчанию logs/participant):
+то, что видит команда, — телеметрия после фильтра политики (снимок раз в
+DOME_PARTICIPANT_LOG_SNAPSHOT_S, изменения состояний — сразу), команды ключа команды с ответами,
+физические действия Оператора из админки и сообщения песочницы. Действия организаторов
+(кризисы, время, политика) и истинное состояние в журнал не пишутся.
+
 Энергосистема (DOME_ENERGY_MODE):
     virtual (по умолчанию) — инвертор и АКБ на время смены виртуальные с одинаковым
                               стартом; показания реального инвертора пишутся для админа;
@@ -86,6 +92,7 @@ import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Optional
 
@@ -99,6 +106,7 @@ sys.path.insert(0, str(SERVER_DIR))
 from authorization.access_policy import ROLE_ADMIN, ROLE_GUEST, ROLE_TEAM, AccessPolicy, PolicyError  # noqa: E402
 from authorization.protector import Protector  # noqa: E402
 from dome_simulator import ControlError, create_dome_simulator  # noqa: E402
+from logger.participant_log import ParticipantLogger  # noqa: E402
 from meeting.meeting_room import NODE_ID as MEETING_NODE, MeetingError, MeetingRoom  # noqa: E402
 from real_devices import RealCommandError, build_adapters  # noqa: E402
 
@@ -132,6 +140,10 @@ DAY_LENGTH_S = {"hybrid": 3 * 3600.0, "real": 24 * 3600.0}
 # По умолчанию: hybrid — 8:00, real — now.
 START_HOUR = os.getenv("DOME_START_HOUR", "").strip().lower()
 ENERGY_NODES = ("solar_inverter_01", "battery_01")
+# Журнал участника (logger/participant_log.py): телеметрия команды, её команды, действия Оператора
+# и сообщения песочницы — JSONL по дням. Пустое значение, off или none — журнал не пишется.
+PARTICIPANT_LOG = os.getenv("DOME_PARTICIPANT_LOG", str(SERVER_DIR / "logs" / "participant")).strip()
+PARTICIPANT_LOG_SNAPSHOT_S = float(os.getenv("DOME_PARTICIPANT_LOG_SNAPSHOT_S", "60"))
 KEYS_CONFIG = os.getenv("DOME_KEYS_CONFIG", str(SERVER_DIR / "authorization" / "keys_config.json"))
 POLICY_FILE = os.getenv("DOME_POLICY_FILE", str(SERVER_DIR / "authorization" / "access_policy.json"))
 
@@ -181,10 +193,15 @@ class DomeServer:
         self.node_modes: dict[str, Mode] = {node_id: "virtual" for node_id in self.adapters}
         self.manual_virtual: set[str] = set()  # узлы, которые админ явно держит виртуальными
 
+        self.plog: Optional[ParticipantLogger] = None
+        if PARTICIPANT_LOG.lower() not in ("", "off", "none", "0"):
+            self.plog = ParticipantLogger(PARTICIPANT_LOG, snapshot_s=PARTICIPANT_LOG_SNAPSHOT_S)
+
         self.sessions: set[Session] = set()
         self._session_ids = itertools.count(1)
         self._sync_task: Optional[asyncio.Task] = None
         self._operator_task: Optional[asyncio.Task] = None
+        self._plog_task: Optional[asyncio.Task] = None
         # реплики виртуального Оператора (поток симулятора -> цикл событий сервера)
         self._operator_lines: queue.SimpleQueue = queue.SimpleQueue()
         self.simulator.subscribe("operator.say", lambda event: self._operator_lines.put(dict(event.payload)))
@@ -224,12 +241,20 @@ class DomeServer:
             f"{nid} ({a.title})" for nid, a in self.adapters.items()) or "нет")
         self._sync_task = asyncio.create_task(self._real_sync_loop())
         self._operator_task = asyncio.create_task(self._operator_loop())
+        if self.plog is not None:
+            self._plog_task = asyncio.create_task(self._participant_log_loop())
+            logger.info("Журнал участника: %s (снимок телеметрии раз в %.0f с)", PARTICIPANT_LOG,
+                        PARTICIPANT_LOG_SNAPSHOT_S)
 
     async def stop(self) -> None:
         if self._sync_task:
             self._sync_task.cancel()
         if self._operator_task:
             self._operator_task.cancel()
+        if self._plog_task:
+            self._plog_task.cancel()
+        if self.plog is not None:
+            self.plog.close()
         self.simulator.stop()
         for adapter in self.adapters.values():
             try:
@@ -292,6 +317,47 @@ class DomeServer:
                 self.simulator.update(node_id, **updates)
         except Exception as e:
             logger.error("Синхронизация %s не удалась: %s", node_id, e)
+
+    # ================= ЖУРНАЛ УЧАСТНИКА =================
+
+    def _dome_time(self) -> dict[str, Any]:
+        outdoor = self.simulator.environment.outdoor
+        return {"day": int(outdoor.day) + 1, "time": f"{int(outdoor.hour) % 24:02d}:{int(outdoor.hour % 1 * 60):02d}"}
+
+    async def _participant_log_loop(self) -> None:
+        """Телеметрия, которую видит команда (без песочницы — её сообщения пишутся отдельно)."""
+        while True:
+            try:
+                nodes = self.policy.filter_nodes(ROLE_TEAM, self.simulator.snapshot()["nodes"])
+                self.plog.observe(datetime.now(), nodes, dome=self._dome_time())
+            except Exception:
+                logger.exception("Журнал участника: ошибка записи телеметрии")
+            await asyncio.sleep(TELEMETRY_INTERVAL)
+
+    def _log_control(self, session: Session, data: dict[str, Any], response: dict[str, Any]) -> None:
+        """Команда участника (ключ активной команды) или физическое действие Оператора из админки.
+        Прочие действия админа (организаторов) и сообщения песочницы сюда не попадают."""
+        if self.plog is None:
+            return
+        node_id, action = data.get("node_id"), data.get("action")
+        if node_id == MEETING_NODE or not isinstance(node_id, str) or not isinstance(action, str):
+            return
+        if session.role == ROLE_TEAM:
+            actor = "agent"
+        elif session.role == ROLE_ADMIN and node_id in self.simulator.node_ids():
+            canonical = self.simulator.resolve_action(node_id, action) or action.strip().lower()
+            if self._origin(session, node_id, canonical) != "operator":
+                return
+            actor = "operator"
+        else:
+            return
+        self.plog.action(datetime.now(), actor, node_id, action, data.get("value"), bool(response.get("success")),
+                         response.get("error"), team=session.team if actor == "agent" else None,
+                         dome=self._dome_time())
+
+    def _log_message(self, message: dict[str, Any]) -> None:
+        if self.plog is not None:
+            self.plog.message(datetime.now(), message, dome=self._dome_time())
 
     # ================= ТЕЛЕМЕТРИЯ =================
 
@@ -471,6 +537,7 @@ class DomeServer:
             raise RequestError(str(e)) from None
         session.posts.append(now)
         logger.info("%s meeting #%d: %s", session, message["id"], _short(message["text"]))
+        self._log_message(message)
         if session.role in (ROLE_ADMIN, ROLE_TEAM):   # гости (неактивные команды) на смену не влияют
             origin = "operator" if session.role == ROLE_ADMIN else "agent"
             await asyncio.to_thread(self.simulator.record_chat, message, origin)
@@ -486,6 +553,7 @@ class DomeServer:
                     value = {"text": line.get("text"), "name": "Оператор", "to": line.get("to")}
                     message = self.meeting.post({"role": "operator", "team": None}, value)
                     logger.info("operator (сценарий) meeting #%d: %s", message["id"], _short(message["text"]))
+                    self._log_message(message)
                     self._broadcast_meeting({"type": "meeting_message", "message": message})
             except queue.Empty:
                 pass
@@ -725,6 +793,11 @@ class DomeServer:
         if not response.get("success") and msg_type == "control":
             response.setdefault("node_id", data.get("node_id"))
             response.setdefault("action", data.get("action"))
+        if msg_type == "control" and entry is not None and session.role in entry[1]:
+            try:
+                self._log_control(session, data, response)
+            except Exception:
+                logger.exception("Журнал участника: ошибка записи команды")
         response["type"] = f"{msg_type}_response"
         if "request_id" in data:
             response["request_id"] = data["request_id"]
