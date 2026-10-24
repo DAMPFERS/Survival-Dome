@@ -1,0 +1,18 @@
+[Unit]
+Description=GRBL TCP-serial bridge (ESP32-compatible :8881)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=dialout
+WorkingDirectory=/opt/grbl-tcp-bridge
+ExecStart=/usr/bin/python3 /opt/grbl-tcp-bridge/grbl_tcp_bridge.py --listen 0.0.0.0 --tcp-port 8881 --serial auto --baud 115200
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

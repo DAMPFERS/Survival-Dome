@@ -1143,11 +1143,11 @@ def build_adapters(current_lines) -> dict[str, RealDeviceAdapter]:
         adapters.append(CNCAdapter(cnc_host, int(os.getenv("CNC_PORT", "8881")),
                                    Path(gcode_dir) if gcode_dir else None))
 
-    fablab_url = os.getenv("FABLAB_URL", "http://127.0.0.1:8000").strip()
+    fablab_url = os.getenv("FABLAB_URL", "http://192.168.8.36:8000").strip()
     if fablab_url and wanted("thermal_insulation_01"):
         adapters.append(FabLabGreenhouseAdapter(fablab_url))
 
-    chemlab_url = os.getenv("CHEMLAB_URL", "http://127.0.0.1:8001").strip()
+    chemlab_url = os.getenv("CHEMLAB_URL", "http://192.168.8.46:8001").strip()
     if chemlab_url and wanted("thermal_insulation_02"):
         adapters.append(ChemLabGreenhouseAdapter(chemlab_url))
 
