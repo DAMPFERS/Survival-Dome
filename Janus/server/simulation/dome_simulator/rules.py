@@ -143,17 +143,18 @@ def power_distribution_rule(ctx: SimContext, dt: float) -> None:
     else:
         bus_powered, bus_v = True, 230.0
 
-    # Реальные реле: блэкаут виртуальной энергосистемы = выключение реле (Д19)
+    # Реальные реле: блэкаут виртуальной энергосистемы = выключение реле (Д19).
+    # ctx.blackout_relays = False (отладка) — реле не трогаем, уже выключенные возвращаем.
     mem = ctx.memory.setdefault("blackout", {"lines": [], "active": False})
     if panel_real:
         lines = ctx.store.get(PANEL, "lines")
-        if not bus_powered and not mem["active"]:
+        if not bus_powered and not mem["active"] and ctx.blackout_relays:
             mem["active"] = True
             mem["lines"] = [l["line"] for l in lines if l["state"] == "ON"]
             for n in mem["lines"]:
                 ctx.real_commands.append((PANEL, "line_off", n))
             ctx.emit("power.blackout_relays_off", Severity.CRITICAL, source="rules", lines=mem["lines"])
-        elif bus_powered and mem["active"]:
+        elif mem["active"] and (bus_powered or not ctx.blackout_relays):
             mem["active"] = False
             for n in mem["lines"]:
                 ctx.real_commands.append((PANEL, "line_on", n))
@@ -392,6 +393,15 @@ def automation_rule(ctx: SimContext, dt: float) -> None:
             _release(ctx, req["id"], ils[req["id"]], events, auto)
 
     primary = a.get("primary_co2_sensor") or "climate_sensor_01"
+    co2 = r.number(primary, "co2_ppm")
+
+    if not ctx.interlocks_enabled:
+        # отладка железа: интерлоки не срабатывают и ничего не отключают, вентиляция по CO₂ работает
+        if ctx.has(FIRE):
+            _set_if_changed(ctx, FIRE, control_auto_trigger_zone=None)
+        _ventilation_by_co2(ctx, a, ils, co2)
+        ctx.update(AUTO, interlocks=ils, events=events[-60:], control_requests=[])
+        return
 
     def step(il: str, condition: bool, delay: float) -> bool:
         """Общая логика задержки. Возвращает True в момент срабатывания."""
@@ -421,7 +431,6 @@ def automation_rule(ctx: SimContext, dt: float) -> None:
         return _log(events, ctx, auto, il, "TRIP", message, **extra)
 
     # --- IL_CO2 ---
-    co2 = r.number(primary, "co2_ppm")
     if step("IL_CO2", co2 is not None and co2 > 2000.0, INTERLOCKS["IL_CO2"]["delay_s"]):
         paused: list[str] = []
         _pause_machines(ctx, paused, "IL_CO2")
@@ -604,14 +613,17 @@ def automation_rule(ctx: SimContext, dt: float) -> None:
                   > 0.9 * float(limits.get(str(n), PANEL_LINES[i][2])),
                   "Ток линии {n} выше 90 % уставки: линия отключена", trip_event)
 
-    # --- вентиляция по CO₂ (demand-controlled ventilation) ---
+    _ventilation_by_co2(ctx, a, ils, co2)
+    ctx.update(AUTO, interlocks=ils, events=events[-60:], control_requests=[])
+
+
+def _ventilation_by_co2(ctx: SimContext, a: dict[str, Any], ils: dict, co2: Optional[float]) -> None:
+    """Вентиляция по CO₂ (demand-controlled ventilation)."""
     if a.get("ventilation_auto") and ctx.has(VENT) and ils["IL_CO2"]["state"] != "TRIPPED":
         if co2 is not None:
             speed = 5.0 * round(clamp(30.0 + (co2 - 700.0) * 0.25, 10.0, 100.0) / 5.0)
             if abs(float(ctx.get(VENT, "speed_pct")) - speed) >= 5.0:
                 ctx.command(VENT, "set_speed", speed, origin="automation")
-
-    ctx.update(AUTO, interlocks=ils, events=events[-60:], control_requests=[])
 
 
 def _per_line(ctx: SimContext, r: _Reader, ils: dict, events: list, auto: Any, il: str, dt: float,

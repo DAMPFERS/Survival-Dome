@@ -64,6 +64,8 @@ class SimContext:
         self.energy_mode = "virtual"               # virtual | demo (реальная PV-генерация инвертора)
         self.real_pv_power_w: Optional[float] = None
         self.real_inverter_reading: dict[str, Any] = {}
+        self.blackout_relays = True                # блэкаут виртуальной энергосистемы выключает реальные реле (Д19)
+        self.interlocks_enabled = True             # интерлоки автоматики (False — отладка: ничего не отключают)
         self.memory: dict[str, Any] = {}           # служебное состояние правил
         self.guard: Any = None                     # holds.check — выставляет Simulator
         self._lock = threading.RLock()

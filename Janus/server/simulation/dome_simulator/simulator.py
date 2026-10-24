@@ -210,6 +210,9 @@ class Simulator:
             self.environment.reset(seed=seed, start_hour=start_hour)
             real = {nid for nid in self.node_ids() if self.ctx.is_real(nid)}
             saved = {nid: self.store.get_node(nid) for nid in real}
+            # реле, выключенные блэкаутом (Д19): после сброса их память теряется — включаем сразу
+            blackout = self.ctx.memory.get("blackout") or {}
+            restore = list(blackout.get("lines", [])) if blackout.get("active") else []
             for index, (type_name, node_id, config) in enumerate(self._node_specs):
                 self.registry.unregister(node_id)
                 node_seed = None if seed is None else seed * 1000 + index
@@ -220,6 +223,7 @@ class Simulator:
             self.ctx.command_log.clear()
             self.ctx.memory.clear()
             self.ctx.real_commands.clear()
+            self.ctx.real_commands.extend(("smart_panel_01", "line_on", n) for n in restore)
             self._fault_rates.clear()
 
     def set_random_faults(self, enabled: bool) -> None:
@@ -421,6 +425,16 @@ class Simulator:
         if mode not in ("virtual", "demo"):
             raise ValueError('energy mode: "virtual" или "demo"')
         self.ctx.energy_mode = mode
+
+    def set_blackout_relays(self, enabled: bool) -> None:
+        """Выключать ли реальные реле щитка при блэкауте виртуальной энергосистемы (Д19).
+        False — для отладки железа; выключенные блэкаутом реле вернутся на следующем тике."""
+        self.ctx.blackout_relays = bool(enabled)
+
+    def set_interlocks(self, enabled: bool) -> None:
+        """Интерлоки автоматики (rules.automation_rule). False — для отладки железа: не срабатывают
+        и ничего не отключают; уже сработавшие снимаются командой reset_interlock."""
+        self.ctx.interlocks_enabled = bool(enabled)
 
     def feed_real_inverter(self, reading: dict[str, Any]) -> None:
         """Показания реального инвертора, пока энергосистема виртуальная: пишутся

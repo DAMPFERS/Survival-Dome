@@ -72,6 +72,10 @@ DOME_PARTICIPANT_LOG_SNAPSHOT_S, изменения состояний — ср�
                               стартом; показания реального инвертора пишутся для админа;
     demo                   — виртуальная энергосистема, но генерация PV — реальная;
     real                   — инвертор и АКБ берут данные с железа (как раньше).
+DOME_BLACKOUT_RELAYS=1 (по умолчанию) — блэкаут виртуальной энергосистемы (E02/E04/E07)
+    физически выключает реле щитка (Д19, нужно для К1, №31, К3); 0 — реле не трогаются (отладка).
+DOME_INTERLOCKS=1 (по умолчанию) — интерлоки автоматики (IL_LOAD_SHED, IL_OVERCURRENT, IL_SMOKE…);
+    0 — не срабатывают и ничего не отключают (отладка; для смены не годится).
 
 Время купола (задаётся при запуске, на ходу не меняется):
     DOME_TIME_MODE=hybrid (по умолчанию) — игровые сутки 3 ч: несколько прогонов смены за день;
@@ -132,6 +136,10 @@ MEETING_RATE = (10, 10.0)   # не больше 10 сообщений песоч
 ACTIVE_TEAM = int(os.getenv("DOME_ACTIVE_TEAM", "1"))           # 1..4
 AUTO_REAL = os.getenv("DOME_AUTO_REAL", "1") not in ("0", "false", "False", "")
 ENERGY_MODE = os.getenv("DOME_ENERGY_MODE", "virtual").strip().lower()   # virtual | demo | real
+# Блэкаут виртуальной энергосистемы выключает реальные реле щитка (Д19). 0 — для отладки железа.
+BLACKOUT_RELAYS = os.getenv("DOME_BLACKOUT_RELAYS", "1") not in ("0", "false", "False", "")
+# Интерлоки автоматики (сброс нагрузки, токовая защита, дым…). 0 — для отладки железа.
+INTERLOCKS = os.getenv("DOME_INTERLOCKS", "1") not in ("0", "false", "False", "")
 # Время купола: hybrid — игровые сутки 3 ч (несколько прогонов смены за день),
 # real — сутки 24 ч, часы купола идут как настоящие. Физика устройств в обоих режимах 1:1.
 TIME_MODE = os.getenv("DOME_TIME_MODE", "hybrid").strip().lower()       # hybrid | real
@@ -189,6 +197,13 @@ class DomeServer:
                                                day_length_s=DAY_LENGTH_S[TIME_MODE], start_hour=_start_hour())
         if ENERGY_MODE in ("virtual", "demo"):
             self.simulator.set_energy_mode(ENERGY_MODE)
+        self.simulator.set_blackout_relays(BLACKOUT_RELAYS)
+        if not BLACKOUT_RELAYS:
+            logger.warning("DOME_BLACKOUT_RELAYS=0: блэкаут не выключает реальные реле "
+                           "(К1, №31, К3 на щитке не сработают)")
+        self.simulator.set_interlocks(INTERLOCKS)
+        if not INTERLOCKS:
+            logger.warning("DOME_INTERLOCKS=0: интерлоки автоматики отключены (сценарий смены не оценивается)")
         self.adapters = build_adapters(lambda: self.simulator.get("smart_panel_01", "lines"))
         self.node_modes: dict[str, Mode] = {node_id: "virtual" for node_id in self.adapters}
         self.manual_virtual: set[str] = set()  # узлы, которые админ явно держит виртуальными
@@ -388,6 +403,8 @@ class DomeServer:
                 "crisis_reports": self.simulator.crisis_reports(),
                 "telemetry_layer": self.simulator.telemetry.describe(),
                 "energy_mode": ENERGY_MODE,
+                "blackout_relays": BLACKOUT_RELAYS,
+                "interlocks": INTERLOCKS,
                 "time_mode": TIME_MODE,
                 "real_inverter": dict(self.simulator.ctx.real_inverter_reading),
             })
