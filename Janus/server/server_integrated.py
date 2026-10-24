@@ -397,7 +397,7 @@ class DomeServer:
                                  "metrics": shift.metrics.to_dict()}
         else:
             fields = self.policy.telemetry_fields(session.role) or set()
-            data = {"nodes": self.policy.filter_nodes(session.role, snap["nodes"])}
+            data = {"nodes": self.policy.filter_nodes(session.role, nodes)}   # с песочницей meeting_01
             data.update({k: full[k] for k in fields if k in full and k != "nodes"})
         return {"type": "telemetry", "timestamp": snap["timestamp"], "role": session.role, "data": data}
 

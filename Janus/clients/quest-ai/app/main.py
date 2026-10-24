@@ -203,15 +203,20 @@ async def api_energy():
 
 @app.post("/api/energy/line")
 async def api_energy_line(payload: LinePayload):
-    """Кнопки линий панели энергетика. Единственное действие, доступное панели: вкл/выкл линии щитка."""
+    """Кнопки линий панели энергетика: вкл/выкл линии щитка. Включение линии со сработавшей
+    защитой (TRIPPED / RCD_TRIP) — взвод защиты reset_protection: line_on сервер в этом случае отклоняет."""
+    action = "line_on" if payload.on else "line_off"
+    if payload.on:
+        lines = (dome_client.get_node_status("smart_panel_01") or {}).get("lines") or []
+        if len(lines) >= payload.line and lines[payload.line - 1].get("state") in ("TRIPPED", "RCD_TRIP"):
+            action = "reset_protection"
     try:
-        result = await dome_client.send_control_command(
-            "smart_panel_01", "line_on" if payload.on else "line_off", payload.line)
+        result = await dome_client.send_control_command("smart_panel_01", action, payload.line)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
     if not result.get("success"):
         raise HTTPException(status_code=409, detail=result.get("error", "Команда не выполнена"))
-    return {"ok": True, "line": payload.line, "on": payload.on, "mode": result.get("mode")}
+    return {"ok": True, "line": payload.line, "on": payload.on, "action": action, "mode": result.get("mode")}
 
 
 # ---------- Админ API ----------

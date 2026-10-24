@@ -137,5 +137,21 @@ LLM_PROVIDER=deepseek   # или mistral
   защиты от нежелательных ответов.
 - Логирование в текстовый файл/экспорт для разбора игры после сессии.
 
+## Веб-панели и сервер купола
 
-curl.exe -H "Content-Type: application/json" -H "Authorization: Bearer 6I6tGOMjkxZbFSyVAROI5CcwRzjE5wfd" -d "{\"model\":\"mistral-small-latest\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}" https://api.mistral.ai/v1/chat/completions
+Помимо чата Хранителя приложение отдаёт две панели (данные — из телеметрии сервера купола,
+`app/panels.py`):
+
+- `/static/files/` — панель участника: энергобаланс, АКБ и режим инвертора, линии щитка с
+  состоянием защиты, микроклимат, принтер и фрезер (задание, удержание сервером, деталь на столе),
+  дизель, ветер, прогнозы и чат с ИИ-помощником;
+- `/static/files-energy/` — панель энергетика: линии щитка с кнопками (включение линии со
+  сработавшей защитой взводит защиту), графики потребления, генерации и прогноз солнца.
+
+Подключение к серверу купола — [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md).
+
+Проверка ключа API Mistral (подставьте свой ключ):
+
+```
+curl.exe -H "Content-Type: application/json" -H "Authorization: Bearer <MISTRAL_API_KEY>" -d "{\"model\":\"mistral-small-latest\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}" https://api.mistral.ai/v1/chat/completions
+```

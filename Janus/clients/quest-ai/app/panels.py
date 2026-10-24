@@ -18,8 +18,11 @@ SOLAR_RATED_KW = 1.2      # суммарная мощность солнечны
 MEAN_WIND_MS = 4.5
 SUNRISE_H, SUNSET_H = 6.0, 20.0
 
-PRINTER_STATUS = {"PRINTING": "printing", "PAUSED": "paused", "ERROR": "error"}
-CNC_STATUS = {"RUNNING": "milling", "PAUSED": "paused", "ALARM": "error"}
+PRINTER_STATUS = {"PRINTING": "printing", "PAUSED": "paused", "ERROR": "error", "COMPLETED": "completed"}
+CNC_STATUS = {"RUNNING": "milling", "PAUSED": "paused", "ALARM": "error", "HOMING": "busy", "BUSY": "busy"}
+# Короткие подписи линий щитка (полные названия — в telemetry lines[].name)
+LINE_SHORT = {1: "Мастерская + вытяжка", 2: "Бокс ФабЛаб", 3: "3D-принтер", 4: "ЧПУ-фрезер", 5: "Бокс Химлаб",
+              6: "Освещение", 7: "Аварийный свет", 8: "Резерв"}
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -46,8 +49,13 @@ def _machine(node: dict[str, Any], status_map: dict[str, str], left_key: str) ->
     status = status_map.get(node.get("state"), "idle")
     return {
         "status": status,
-        "progress": round(_f(node.get("progress_pct")), 1) if status != "idle" else 0.0,
+        "progress": round(_f(node.get("progress_pct")), 1) if status not in ("idle", "busy") else 0.0,
         "remainMin": int(_f(node.get(left_key)) // 60),
+        "file": node.get("file_name"),
+        # удержание сервером (пауза автоматики): None | WARNING | ALARM и код причины
+        "hold": node.get("hold_level"),
+        "holdReason": node.get("hold_reason"),
+        "online": node.get("online", True),
     }
 
 
@@ -60,14 +68,27 @@ def participant_telemetry(telemetry: dict[str, Any]) -> dict[str, Any]:
     cloud_k = 1.0 - 0.75 * _cloud_cover(telemetry) ** 1.5
     wind_now = _f(nodes.get("weather_station_01", {}).get("wind_speed_ms"), MEAN_WIND_MS)
     lines = nodes.get("smart_panel_01", {}).get("lines", [])
+    inverter = nodes.get("solar_inverter_01", {})
+    printer = nodes.get("printer_3d_01", {})
+    wind = nodes.get("wind_turbine_01", {})
     return {
         "solarKw": _f(nodes.get("solar_panels_01", {}).get("power_w")) / 1000.0,
-        "windKw": _f(nodes.get("wind_turbine_01", {}).get("power_w")) / 1000.0,
+        "windKw": _f(wind.get("power_w")) / 1000.0,
+        "windState": wind.get("state"),
         "lines": [_f(l.get("power_w")) / 1000.0 for l in lines],
+        "lineNames": [LINE_SHORT.get(l.get("line"), l.get("name")) for l in lines],
+        "lineStates": [l.get("state") for l in lines],
+        "battery": {
+            "soc": inverter.get("battery_soc_pct"),
+            "mode": inverter.get("mode"),
+            "error": inverter.get("error_code"),
+            "grid": inverter.get("grid_state"),
+        },
         "temp": _f(climate.get("temperature_c")),
         "hum": _f(climate.get("humidity_pct")),
         "co2": _f(climate.get("co2_ppm")),
-        "printer": _machine(nodes.get("printer_3d_01", {}), PRINTER_STATUS, "print_time_left_s"),
+        "printer": {**_machine(printer, PRINTER_STATUS, "print_time_left_s"),
+                    "bedClear": printer.get("bed_clear", True)},
         "cnc": _machine(nodes.get("cnc_01", {}), CNC_STATUS, "job_time_left_s"),
         "diesel": {
             "on": dizel.get("state") == "ON",

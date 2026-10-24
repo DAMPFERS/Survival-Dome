@@ -9,6 +9,7 @@ const REQUEST_TIMEOUT_MS = 12000;
 const state = {
   ws: null, connected: false, bridge: {}, t: null, catalog: [], catalogById: {},
   crises: [], pending: new Map(), seq: 1, log: [], nodeCards: {}, tab: 'overview', policy: null,
+  chat: new Map(), chatUnseen: 0,   // сообщения песочницы meeting_01 по id
 };
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,8 @@ function onMessage(msg) {
     return;
   }
   if (msg.type === 'session_revoked') { toast(`Сессия отозвана: ${msg.reason}`, true); return; }
+  if (msg.type === 'meeting_message') { addChat([msg.message], true); return; }
+  if (msg.type === 'meeting_cleared') { state.chat.clear(); renderChat(); return; }
   const p = state.pending.get(msg.request_id);
   if (p) {
     state.pending.delete(msg.request_id);
@@ -105,6 +108,59 @@ async function loadCatalogs() {
     (a.name[0] === 'k') - (b.name[0] === 'k') || a.name.localeCompare(b.name));
   renderCatalog();
   render();
+  loadChat();
+}
+
+// ---------------------------------------------------------------------------
+// Чат песочницы meeting_01 (рабочее место Оператора)
+// ---------------------------------------------------------------------------
+
+async function loadChat() {
+  const r = await request({type: 'query', node_id: 'meeting_01', query: 'read_messages', params: {limit: 200}},
+    {quiet: true});
+  if (!r.success) return;
+  state.chat.clear();
+  addChat(r.result || [], false);
+}
+
+function addChat(messages, live) {
+  for (const m of messages) {
+    if (!m || state.chat.has(m.id)) continue;
+    state.chat.set(m.id, m);
+    if (live && state.tab !== 'chat' && m.sender?.role !== 'operator') state.chatUnseen++;
+  }
+  $('chatCount').textContent = state.chatUnseen || '';
+  if (state.tab === 'chat') renderChat();
+}
+
+function senderName(s = {}) {
+  if (s.role === 'operator') return `Оператор${s.name && s.name !== 'Оператор' ? ` (${s.name})` : ''}`;
+  const who = s.role === 'guest' ? `гость, команда ${s.team}` : `команда ${s.team}`;
+  return s.name ? `${s.name} (${who})` : who;
+}
+
+function renderChat() {
+  state.chatUnseen = 0;
+  $('chatCount').textContent = '';
+  const box = $('chatMsgs');
+  const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  const items = [...state.chat.values()].sort((a, b) => a.id - b.id);
+  box.innerHTML = items.map(m => `<div class="ev ${m.sender?.role === 'operator' ? 'ok' : m.sender?.role === 'guest' ? 'mute' : ''}">
+    <time>${new Date(m.time * 1000).toLocaleTimeString('ru-RU')}</time>
+    <span><b>${esc(senderName(m.sender))}</b>${m.to ? ` → ${esc(m.to)}` : ''}</span>
+    <span class="chat-text">${esc(m.text)}</span><span class="mut">#${m.id}</span></div>`).join('')
+    || '<span class="mut">Сообщений нет</span>';
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+
+async function sendChat() {
+  const text = $('chatText').value.trim();
+  if (!text) return;
+  const value = {text, name: 'Оператор'};
+  if ($('chatTo').value) value.to = $('chatTo').value;
+  const r = await request({type: 'control', node_id: 'meeting_01', action: 'post_message', value}, {quiet: true});
+  if (r.success) { $('chatText').value = ''; if (r.message) addChat([r.message], false); }
+  else toast(`Сообщение не отправлено: ${r.error}`, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +279,7 @@ function renderShiftMetrics() {
     ['Блэкауты', `${m.blackouts ?? 0} (${hms(m.blackout_s)})`], ['Ошибки инвертора', esc(JSON.stringify(m.inverter_errors || {}))],
     ['Сбросы нагрузки', m.load_shed_trips ?? 0], ['Пуски пожаротушения', esc((m.fire_suppression_starts || []).join(', ') || '—')],
     ['Брак деталей', esc((m.part_defects || []).join(', ') || '—')],
+    ['Деталь ждёт в боксе', hms(m.part_waiting_s)], ['ALARM станков', esc((m.machine_alarms || []).join(', ') || '—')],
   ]);
 }
 
@@ -321,6 +378,10 @@ const HINTS = {
   move: ['{"x": 10, "y": 0, "z": -5, "mode": "relative", "feedrate": 1000}', 'relative — смещение, absolute — рабочие координаты'],
   set_zero: ['xy', 'оси: xyz (по умолчанию) | xy | z'],
   probe_z: ['{"distance": 10, "plate_thickness": 0, "retract": 2}', 'distance, feed, plate_thickness, retract, second_pass_feed, latch_distance'],
+  set_lock: ['{"lock": 0, "locked": false}', 'ФабЛаб: lock 0–1; Химлаб: true / false'],
+  set_door: ['{"door": 0, "open": true}', 'дверь бокса (Оператор), только при открытом замке'],
+  set_vacuum: ['1', '1 / 0'], set_relay_fan_level: ['5', '0–10'],
+  set_fault_mode: ['{"mode": 2, "fan": 4}', 'неисправность стенда ФабЛаб: mode 0–2'],
 };
 
 function renderNodes() {
@@ -499,8 +560,19 @@ document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', (
   document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b === btn));
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === `page-${btn.dataset.tab}`));
   state.tab = btn.dataset.tab;
-  if (state.tab === 'log') renderLog(); else render();
+  if (state.tab === 'log') renderLog();
+  else if (state.tab === 'chat') { renderChat(); $('chatMsgs').scrollTop = $('chatMsgs').scrollHeight; }
+  else render();
 }));
+
+$('btnChatSend').onclick = sendChat;
+$('chatText').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+$('btnChatReload').onclick = loadChat;
+$('btnChatClear').onclick = async () => {
+  if (!confirm('Удалить всю историю песочницы на сервере? Её увидят пустой все команды.')) return;
+  const r = await request({type: 'control', node_id: 'meeting_01', action: 'clear'});
+  if (r.success) { state.chat.clear(); renderChat(); toast(`История очищена (${r.removed} сообщений)`); }
+};
 
 document.body.addEventListener('click', async e => {
   const b = e.target.closest('button');

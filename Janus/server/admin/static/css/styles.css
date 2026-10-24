@@ -116,6 +116,10 @@ td.acts button{margin-right:4px}
 .ev time{color:var(--mut)}
 .ev.bad{border-color:var(--bad)}.ev.ok{border-color:#1f3d2d}
 .ev code{white-space:pre-wrap;word-break:break-word;font-family:Consolas,monospace;font-size:11px;color:var(--mut)}
+.chat-msgs{max-height:60vh;min-height:200px;font-size:13px;margin-bottom:10px}
+.chat-msgs .ev{grid-template-columns:70px minmax(140px,220px) 1fr auto}
+.chat-msgs .ev.mute{opacity:.7}
+.chat-text{white-space:pre-wrap;word-break:break-word}
 .pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px;font-family:Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-word;max-height:60vh;overflow:auto}
 
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:10;padding:20px}

@@ -34,6 +34,7 @@ function mockTelemetry() {
     temp: sim.temp, hum: sim.hum, co2: sim.co2,
     printer: step(sim.printer), cnc: step(sim.cnc),
     diesel: { on: sim.solar < 1, kw: sim.solar < 1 ? 2.2 : 0, fuel: sim.fuel },
+    battery: { soc: clamp(40 + sim.solar * 10, 0, 100), mode: 'HYBRID' },
     fSun: sim.fSun, fWind: sim.fWind
   };
 }
@@ -46,14 +47,26 @@ async function getTelemetry() {
 }
 
 // ---- отрисовка ----
-const STATUS = { printing: 'Печатает', milling: 'Фрезерует', paused: 'Пауза', idle: 'Простой', error: 'Авария' };
+const STATUS = { printing: 'Печатает', milling: 'Фрезерует', paused: 'Пауза', idle: 'Простой', error: 'Авария',
+  completed: 'Готово', busy: 'Наладка' };
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 function machine(id, d) {
   const a = d.status === 'printing' || d.status === 'milling';
-  if (d.status === 'error') { $(id).innerHTML = `<span class="badge pause">${STATUS.error}</span>`; return; }
-  const h = d.status === 'idle' ? '' : `<div class="bar"><div style="width:${d.progress}%"></div></div>
+  if (d.online === false) { $(id).innerHTML = '<span class="badge pause">Нет питания</span>'; return; }
+  // удержание сервером: пауза автоматики (WARNING) или блокировка (ALARM) с кодом причины
+  const hold = d.hold ? `<div class="kv"><span>${d.hold === 'ALARM' ? 'Блокировка' : 'Удержание'} <b>${esc(d.holdReason)}</b></span></div>` : '';
+  const file = d.file ? `<div class="kv"><span>Файл <b>${esc(d.file)}</b></span></div>` : '';
+  if (d.status === 'error') { $(id).innerHTML = `<span class="badge pause">${STATUS.error}</span>${hold}${file}`; return; }
+  if (d.status === 'completed') {
+    $(id).innerHTML = `<span class="badge on">${STATUS.completed}</span>${file}` +
+      (d.bedClear === false ? '<div class="kv"><span>Деталь <b>ждёт на столе</b></span></div>' : '');
+    return;
+  }
+  const h = d.status === 'idle' || d.status === 'busy' ? '' : `<div class="bar"><div style="width:${d.progress}%"></div></div>
     <div class="kv"><span>Готово <b>${Math.round(d.progress)}%</b></span><span>Осталось <b>${Math.floor(d.remainMin / 60)} ч ${d.remainMin % 60} мин</b></span></div>`;
-  $(id).innerHTML = `<span class="badge ${a ? 'on' : d.status === 'paused' ? 'pause' : ''}">${STATUS[d.status]}</span>${h}`;
+  $(id).innerHTML = `<span class="badge ${a ? 'on' : d.status === 'paused' ? 'pause' : ''}">${STATUS[d.status] || d.status}</span>${hold}${file}${h}`;
 }
+const LINE_STATE = { OFF: 'выкл', TRIPPED: 'защита', RCD_TRIP: 'УЗО' };
 function bars(id, arr, unit, startHour) {
   // startHour — первый час прогноза по времени купола (от сервера); в демо — по часам браузера
   const max = Math.max(...arr, 1), now = startHour ?? new Date().getHours();
@@ -75,7 +88,16 @@ function render(t) {
   $('cons').textContent = cons.toFixed(1) + ' кВт';
   const bal = gen + t.windKw + t.diesel.kw - cons;
   $('bal').textContent = (bal >= 0 ? '+' : '') + bal.toFixed(1) + ' кВт';
-  $('lines').innerHTML = t.lines.map((v, i) => `<div class="ln"><span>${CONFIG.lineNames[i]}</span><div class="track"><div style="width:${v / CONFIG.lineMaxKw * 100}%"></div></div><em>${v.toFixed(2)} кВт</em></div>`).join('');
+  const names = t.lineNames || CONFIG.lineNames, states = t.lineStates || [];
+  $('lines').innerHTML = t.lines.map((v, i) => {
+    const st = states[i] && states[i] !== 'ON' ? ` <b>(${LINE_STATE[states[i]] || esc(states[i])})</b>` : '';
+    return `<div class="ln"><span>${i + 1}. ${esc(names[i])}${st}</span><div class="track"><div style="width:${v / CONFIG.lineMaxKw * 100}%"></div></div><em>${v.toFixed(2)} кВт</em></div>`;
+  }).join('');
+  if (t.battery) {
+    const soc = t.battery.soc;
+    tile('soc', soc == null ? '—' : Math.round(soc) + ' %', soc != null && soc < 40, soc != null && soc < 25);
+    $('invMode').textContent = (t.battery.mode || '—') + (t.battery.error ? ' · ' + t.battery.error : '');
+  }
   tile('temp', t.temp.toFixed(1) + ' °C', t.temp > 27 || t.temp < 19, t.temp > 30);
   tile('hum', Math.round(t.hum) + ' %', t.hum > 65 || t.hum < 30);
   tile('co2', Math.round(t.co2) + ' ppm', t.co2 > 1000, t.co2 > 1500);
@@ -83,8 +105,8 @@ function render(t) {
   $('diesel').innerHTML = `<span class="badge ${t.diesel.on ? 'on' : ''}">${t.diesel.on ? 'Работает' : 'Выключен'}</span>
     <div class="kv"><span>Мощность <b>${t.diesel.kw.toFixed(1)} кВт</b></span><span>Топливо <b>${Math.round(t.diesel.fuel)}%</b></span></div>
     <div class="bar"><div style="width:${t.diesel.fuel}%"></div></div>`;
-  const wOn = t.windKw > 0.05;
-  $('windgen').innerHTML = `<span class="badge ${wOn ? 'on' : ''}">${wOn ? 'Вырабатывает' : 'Штиль'}</span>
+  const wOn = t.windKw > 0.05, wFault = t.windState === 'FAULT', wOff = t.windState === 'OFF';
+  $('windgen').innerHTML = `<span class="badge ${wOn ? 'on' : wFault ? 'pause' : ''}">${wFault ? 'Авария' : wOff ? 'Выключен' : wOn ? 'Вырабатывает' : 'Штиль'}</span>
     <div class="kv"><span>Мощность <b>${t.windKw.toFixed(2)} кВт</b></span></div>`;
   bars('fSun', t.fSun, '%', t.forecastStartHour); bars('fWind', t.fWind, 'м/с', t.forecastStartHour);
   $('upd').textContent = 'обновлено ' + new Date().toLocaleTimeString('ru-RU');

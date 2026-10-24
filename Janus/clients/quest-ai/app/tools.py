@@ -40,9 +40,10 @@ STATUS_NODES: list[str] = [
     "smart_panel_01", "printer_3d_01", "cnc_01", "material_inventory_01", "equipment_cooling_01",
     "climate_sensor_01", "climate_sensor_02", "climate_sensor_03", "air_quality_sensor_01",
     "smoke_detector_01", "fume_extraction_01", "supply_ventilation_01", "dome_sealing_01",
-    "thermal_insulation_01", "weather_station_01", "seysmo_01", "radiation_sensor_01", "chem_sensor_01",
-    "water_pump_01", "water_tank_01", "water_filter_01", "fire_suppression_01", "access_control_01",
-    "radio_01", "backup_comms_01", "edge_compute_01",
+    "thermal_insulation_01", "thermal_insulation_02", "weather_station_01", "seysmo_01", "radiation_sensor_01",
+    "chem_sensor_01", "smoke_detector_02", "water_pump_01", "water_tank_01", "water_filter_01",
+    "fire_suppression_01", "access_control_01", "radio_01", "backup_comms_01", "edge_compute_01",
+    "network_link_01", "dome_automation_01",
 ]
 
 
@@ -61,8 +62,10 @@ DOME_CONTROL_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "control_power_line",
             "description": "Включить или выключить линию умного электрического щитка купола (линии 1–8: "
-                           "1 производственный отдел, 2 ЧПУ-фрезер, 3 3D-принтер, 4 освещение, "
-                           "5 аварийное освещение, 6 вытяжка FabLab, 7–8 резервные).",
+                           "1 производственный отдел — рабочее место и вытяжка FabLab, 2 бокс ФабЛаб, "
+                           "3 3D-принтер, 4 ЧПУ-фрезер, 5 бокс Химлаб, 6 основное освещение, "
+                           "7 аварийное освещение, 8 резервная). Линию со сработавшей защитой "
+                           "возвращает действие reset_protection (control_dome_node).",
             "parameters": {
                 "type": "object",
                 "properties": {

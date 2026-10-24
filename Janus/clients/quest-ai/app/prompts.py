@@ -3,7 +3,8 @@ from typing import Any
 
 PRINTER_STATES = {"IDLE": "простаивает", "PRINTING": "печатает", "PAUSED": "на паузе",
                   "ERROR": "ошибка", "COMPLETED": "печать завершена"}
-CNC_STATES = {"IDLE": "простаивает", "RUNNING": "фрезерует", "PAUSED": "на паузе", "ALARM": "авария"}
+CNC_STATES = {"IDLE": "простаивает", "RUNNING": "фрезерует", "PAUSED": "на паузе", "ALARM": "авария",
+              "HOMING": "ищет ноль", "BUSY": "занят"}
 
 
 def _num(value: Any, fmt: str = ".1f") -> str:
@@ -79,14 +80,29 @@ def format_telemetry_for_prompt(telemetry: dict[str, Any] | None) -> str:
                      + (f", авария {f.get('alarm_code')}" if f.get("alarm") else ""))
 
     # --- Производство ---
+    def hold(node: dict[str, Any]) -> str:
+        # пауза сервера (автоматика или авария): hold_level WARNING/ALARM, причина — hold_reason
+        if not node.get("hold_level"):
+            return ""
+        return f", удержание {node['hold_level']} ({node.get('hold_reason')})"
+
     if "printer_3d_01" in nodes:
         p = nodes["printer_3d_01"]
         job = f" «{p.get('file_name')}» {_num(p.get('progress_pct'), '.0f')}%" if p.get("file_name") else ""
-        lines.append(f"🖨️ 3D-принтер: {PRINTER_STATES.get(p.get('state'), p.get('state'))}{job}")
+        part = ", деталь ждёт на столе" if p.get("bed_clear") is False else ""
+        lines.append(f"🖨️ 3D-принтер: {PRINTER_STATES.get(p.get('state'), p.get('state'))}{job}{hold(p)}{part}")
     if "cnc_01" in nodes:
         c = nodes["cnc_01"]
         job = f" «{c.get('file_name')}» {_num(c.get('progress_pct'), '.0f')}%" if c.get("file_name") else ""
-        lines.append(f"🛠️ ЧПУ-фрезер: {CNC_STATES.get(c.get('state'), c.get('state'))}{job}")
+        lines.append(f"🛠️ ЧПУ-фрезер: {CNC_STATES.get(c.get('state'), c.get('state'))}{job}{hold(c)}")
+    if "thermal_insulation_01" in nodes:
+        box = nodes["thermal_insulation_01"]
+        lines.append(f"📦 Бокс ФабЛаб (принтер внутри): замки {box.get('locks')}, двери {box.get('doors')}, "
+                     f"VOC {box.get('voc_index')}")
+    automation = nodes.get("dome_automation_01", {})
+    tripped = [il for il, st in (automation.get("interlocks") or {}).items() if (st or {}).get("state") == "TRIPPED"]
+    if tripped:
+        lines.append(f"🚧 Сработали интерлоки автоматики: {', '.join(tripped)}")
 
     # --- Вода и внешняя среда ---
     if "water_tank_01" in nodes:
@@ -132,8 +148,10 @@ def build_system_prompt(current_stage: int, lore_chunks: list[str], telemetry: d
   в разделе ниже — считай, что ты об этом ничего не знаешь.
 
 УПРАВЛЕНИЕ КУПОЛОМ:
-- Линии умного щитка 1–8 (control_power_line): 1 производственный отдел, 2 ЧПУ-фрезер,
-  3 3D-принтер, 4 освещение, 5 аварийное освещение, 6 вытяжка FabLab, 7–8 резервные.
+- Линии умного щитка 1–8 (control_power_line): 1 производственный отдел (рабочее место и вытяжка
+  FabLab), 2 бокс ФабЛаб, 3 3D-принтер, 4 ЧПУ-фрезер, 5 бокс Химлаб, 6 основное освещение,
+  7 аварийное освещение, 8 резервная. Линию со сработавшей защитой (TRIPPED, RCD_TRIP)
+  возвращает reset_protection, а не включение.
 - Дизель-генератор (control_diesel_generator): запуск и остановка.
 - 3D-принтер и ЧПУ-фрезер (control_production): пауза, продолжение, прерывание, поиск нуля.
 - Вентиляция (control_ventilation): приточная вентиляция и вытяжка FabLab.

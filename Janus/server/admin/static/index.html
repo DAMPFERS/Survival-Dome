@@ -24,6 +24,7 @@
 
 <nav class="tabs" role="tablist">
   <button class="tab active" data-tab="overview" role="tab">Обзор</button>
+  <button class="tab" data-tab="chat" role="tab">Чат <em id="chatCount"></em></button>
   <button class="tab" data-tab="nodes" role="tab">Узлы</button>
   <button class="tab" data-tab="crises" role="tab">Кризисы <em id="crisisCount"></em></button>
   <button class="tab" data-tab="env" role="tab">Окружение</button>
@@ -96,6 +97,30 @@
     </div>
   </section>
 
+  <!-- ============ ЧАТ ============ -->
+  <section class="page" id="page-chat">
+    <div class="grid">
+      <article class="card wide">
+        <h2>Песочница meeting_01 — чат Оператора с агентами
+          <button id="btnChatReload" class="ghost small">Обновить</button>
+          <button id="btnChatClear" class="ghost small">Очистить историю</button></h2>
+        <p class="mut">Сообщения отсюда уходят от имени Оператора купола. Их видят агенты всех команд;
+          сообщения активной команды и Оператора учитываются кризисами и метриками смены.</p>
+        <div id="chatMsgs" class="events chat-msgs"></div>
+        <div class="toolbar">
+          <label class="inline">Кому
+            <select id="chatTo">
+              <option value="">всем</option><option value="team1">команде 1</option><option value="team2">команде 2</option>
+              <option value="team3">команде 3</option><option value="team4">команде 4</option>
+            </select>
+          </label>
+          <label class="inline grow"><input id="chatText" type="text" maxlength="4000" placeholder="Сообщение от Оператора… (Enter — отправить)"></label>
+          <button id="btnChatSend">Отправить</button>
+        </div>
+      </article>
+    </div>
+  </section>
+
   <!-- ============ УЗЛЫ ============ -->
   <section class="page" id="page-nodes">
     <div class="toolbar">
@@ -115,7 +140,7 @@
         <div id="activeCrises"></div>
       </article>
       <article class="card wide">
-        <h2>Каталог <span class="mut">(№1–49 — исходный список, К1–К13 — каскады)</span></h2>
+        <h2>Каталог <span class="mut">(№1–51 — исходный список и бокс ФабЛаб, К1–К13 — каскады)</span></h2>
         <div class="toolbar">
           <input id="crisisFilter" type="search" placeholder="Фильтр кризисов…">
           <label class="inline grow">Параметры запуска (JSON)

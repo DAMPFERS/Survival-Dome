@@ -61,6 +61,9 @@ class DomeClient:
         # Производство
         "printer_3d_01",
         "cnc_01",
+        "thermal_insulation_01",   # бокс ФабЛаб с принтером: замки, двери, VOC
+        # Автоматика купола: интерлоки
+        "dome_automation_01",
         # Климат и безопасность
         "climate_sensor_01",
         "air_quality_sensor_01",
