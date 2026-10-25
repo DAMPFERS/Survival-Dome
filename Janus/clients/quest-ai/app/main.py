@@ -112,6 +112,7 @@ async def answer_player(user_message: str) -> str:
     messages = [{"role": "system", "content": system_prompt}] + history
 
     # 4. Запрос к LLM с поддержкой function calling
+    failure = None
     try:
         response_text, tool_calls = await llm.chat_with_tools(messages, DOME_CONTROL_TOOLS)
 
@@ -147,15 +148,30 @@ async def answer_player(user_message: str) -> str:
                            + "\n\nСообщи участнику результат кратко и по существу.",
             })
             answer = await llm.chat(messages)
+            if not answer:
+                # команды уже выполнены — не теряем результат, если модель не сформулировала ответ
+                logger.warning("[LLM] пустой ответ после выполнения команд, отдаём результаты как есть")
+                answer = "Результаты выполнения команд:\n" + "\n".join(
+                    f"- {r.get('message')}" for r in tool_results
+                )
         else:
-            answer = response_text or "Ответ не сформирован. Повторите запрос."
+            answer = response_text
+
+        if not answer:
+            failure = "empty response"
+            answer = "Ответ не сформирован. Повторите запрос."
 
     except Exception as e:
+        failure = f"{type(e).__name__}: {e}"
         answer = "Система купола временно не может обработать запрос. Повторите его через несколько секунд."
         logger.error(f"[LLM ERROR] {e}", exc_info=True)
 
-    # 6. Сохраняем ответ
-    game_state.log_message(session_id, "assistant", answer)
+    # 6. Сохраняем ответ. Сообщения о сбое в историю диалога не попадают
+    # (иначе модель видит их в контексте и начинает путаться) — только в админ-лог.
+    if failure:
+        game_state.log_message(session_id, "system", f"[LLM FAILURE] {failure} -> {answer}")
+    else:
+        game_state.log_message(session_id, "assistant", answer)
     return answer
 
 

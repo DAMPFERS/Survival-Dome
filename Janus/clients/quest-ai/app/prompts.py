@@ -120,15 +120,26 @@ def format_telemetry_for_prompt(telemetry: dict[str, Any] | None) -> str:
             return ""
         return f", удержание {node['hold_level']} ({node.get('hold_reason')})"
 
+    def files(node: dict[str, Any]) -> str:
+        names = node.get("files") or []
+        return f"; файлы для запуска: {', '.join(names)}" if names else "; файлов для запуска нет"
+
     if "printer_3d_01" in nodes:
         p = nodes["printer_3d_01"]
         job = f" «{p.get('file_name')}» {_num(p.get('progress_pct'), '.0f')}%" if p.get("file_name") else ""
         part = ", деталь ждёт на столе" if p.get("bed_clear") is False else ""
-        lines.append(f"🖨️ 3D-принтер: {PRINTER_STATES.get(p.get('state'), p.get('state'))}{job}{hold(p)}{part}")
+        lines.append(f"🖨️ 3D-принтер: {PRINTER_STATES.get(p.get('state'), p.get('state'))}{job}{hold(p)}{part}"
+                     f"{files(p)}")
     if "cnc_01" in nodes:
         c = nodes["cnc_01"]
         job = f" «{c.get('file_name')}» {_num(c.get('progress_pct'), '.0f')}%" if c.get("file_name") else ""
-        lines.append(f"🛠️ ЧПУ-фрезер: {CNC_STATES.get(c.get('state'), c.get('state'))}{job}{hold(c)}")
+        probe = c.get("last_probe")
+        probe_text = (f", последний пробинг Z: {'успешно' if probe.get('success') else 'касания нет'}"
+                      if probe else "")
+        pos = (f", рабочие координаты X {_num(c.get('x_mm'), '.2f')} Y {_num(c.get('y_mm'), '.2f')} "
+               f"Z {_num(c.get('z_mm'), '.2f')} мм" if c.get("x_mm") is not None else "")
+        lines.append(f"🛠️ ЧПУ-фрезер: {CNC_STATES.get(c.get('state'), c.get('state'))}{job}{hold(c)}"
+                     f"{pos}{probe_text}{files(c)}")
 
     # --- МС-ТЮК: теплицы ---
     if "thermal_insulation_01" in nodes:
@@ -194,7 +205,14 @@ def build_system_prompt(current_stage: int, lore_chunks: list[str], telemetry: d
   Управление (control_greenhouse): ШИМ вентиляторов, пылесос ФабЛаба, релейный вентилятор Химлаба,
   замки. Двери открывает только Оператор физически и только при открытом замке.
 - Дизель-генератор (control_diesel_generator): запуск и остановка.
-- 3D-принтер и ЧПУ-фрезер (control_production): пауза, продолжение, прерывание, поиск нуля.
+- 3D-принтер и ЧПУ-фрезер (control_production): пауза, продолжение, прерывание, поиск нуля,
+  запуск задания (start_job) — только по файлу из списка «файлы для запуска» этого станка;
+  если участник не назвал файл или такого файла нет — перечисли доступные и уточни. Перед печатью
+  стол принтера должен быть свободен. probe_z (только ЧПУ) — поиск поверхности заготовки пробником
+  и установка Z0: станок простаивает, пробник подключён; если касания нет — станок уходит
+  в аварию, её снимает поиск нуля (home). set_zero (только ЧПУ, в простое) — текущее положение
+  головы становится нулём рабочих координат по указанным осям; обычно X/Y обнуляют в углу
+  заготовки, а Z — пробингом. Список файлов станка — в разделе «ТЕКУЩЕЕ СОСТОЯНИЕ КУПОЛА».
 - Вентиляция (control_ventilation): приточная вентиляция и вытяжка FabLab.
 - Прочие разрешённые действия над узлами (control_dome_node) и подробности о любом узле (get_node_status).
 - Если действие не удалось или недоступно — так и сообщи, укажи причину, не придумывай результат.

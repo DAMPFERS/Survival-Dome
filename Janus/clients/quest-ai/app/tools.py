@@ -21,8 +21,8 @@ KEEPER_ALLOWED_ACTIONS: dict[str, list[str]] = {
     "wind_turbine_01": ["turn_on", "turn_off"],
     "dizel_1": ["turn_on", "turn_off"],
     "smart_panel_01": ["line_on", "line_off", "reset_protection", "reset_line_error"],
-    "printer_3d_01": ["pause", "resume", "abort", "home"],
-    "cnc_01": ["feed_hold", "resume", "abort", "home"],
+    "printer_3d_01": ["pause", "resume", "abort", "home", "start_job"],
+    "cnc_01": ["feed_hold", "resume", "abort", "home", "start_job", "probe_z", "set_zero"],
     "fume_extraction_01": ["turn_on", "turn_off", "reset_alarm"],
     "supply_ventilation_01": ["turn_on", "turn_off", "set_speed", "set_mode", "reset_alarm"],
     "equipment_cooling_01": ["turn_on", "turn_off", "set_speed"],
@@ -98,12 +98,27 @@ DOME_CONTROL_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "control_production",
             "description": "Управление производственным оборудованием: 3D-принтером или ЧПУ-фрезером "
-                           "(пауза, продолжение, прерывание задания, поиск нулевого положения).",
+                           "(пауза, продолжение, прерывание задания, поиск нулевого положения, запуск задания "
+                           "по файлу из памяти станка). Только для ЧПУ (станок в IDLE, без задания): "
+                           "probe_z — поиск поверхности заготовки пробником и установка Z0 (пробник подключён); "
+                           "set_zero — текущая точка становится нулём рабочих координат по осям axes.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "machine": {"type": "string", "enum": ["printer", "cnc"], "description": "printer — 3D-принтер, cnc — ЧПУ-фрезер"},
-                    "action": {"type": "string", "enum": ["pause", "resume", "abort", "home"]},
+                    "action": {"type": "string",
+                               "enum": ["pause", "resume", "abort", "home", "start_job", "probe_z", "set_zero"],
+                               "description": "start_job — запустить печать/фрезеровку файла; "
+                                              "probe_z и set_zero — только cnc"},
+                    "file_name": {"type": "string",
+                                  "description": "Для start_job: точное имя файла из списка файлов станка "
+                                                 "(раздел «ТЕКУЩЕЕ СОСТОЯНИЕ КУПОЛА»)"},
+                    "plate_thickness": {"type": "number",
+                                        "description": "Для probe_z: толщина пластины пробника, мм (0–30, по умолчанию 0)"},
+                    "distance": {"type": "number",
+                                 "description": "Для probe_z: максимальный ход вниз, мм (0.1–30, по умолчанию 10)"},
+                    "axes": {"type": "string", "enum": ["xy", "x", "y", "z", "xyz"],
+                             "description": "Для set_zero: какие оси обнулить в текущей точке"},
                 },
                 "required": ["machine", "action"],
             },
@@ -241,9 +256,25 @@ def resolve_tool_call(tool_name: str, arguments: dict[str, Any]) -> tuple[str, s
         machine = arguments.get("machine")
         node_id = {"printer": "printer_3d_01", "cnc": "cnc_01"}.get(machine)
         action = arguments.get("action")
+        value = None
         if machine == "cnc" and action == "pause":
             action = "feed_hold"
-        value = None
+        elif action == "start_job":
+            file_name = str(arguments.get("file_name") or "").strip()
+            if not file_name:
+                raise ValueError("Для запуска задания нужно имя файла (file_name)")
+            value = {"file_name": file_name}
+        elif action in ("probe_z", "set_zero") and machine != "cnc":
+            raise ValueError("Пробинг Z и установка нуля доступны только для ЧПУ-фрезера")
+        elif action == "set_zero":
+            axes = str(arguments.get("axes") or "").strip().lower()
+            if not axes:
+                raise ValueError("Для установки нуля нужно указать оси (axes), например xy")
+            value = {"axes": axes}
+        elif action == "probe_z":
+            # остальные параметры (feed, retract, ...) — значения сервера по умолчанию
+            value = {key: float(arguments[key]) for key in ("plate_thickness", "distance")
+                     if arguments.get(key) is not None} or None
     elif tool_name == "control_ventilation":
         node_id = {"supply": "supply_ventilation_01", "fume": "fume_extraction_01"}.get(arguments.get("system"))
         action = {"on": "turn_on", "off": "turn_off"}.get(arguments.get("action"), arguments.get("action"))

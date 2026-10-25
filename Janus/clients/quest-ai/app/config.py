@@ -17,7 +17,12 @@ class Settings:
     MISTRAL_BASE_URL: str = "https://api.mistral.ai/v1"
 
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.35"))
-    LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "600"))
+    # Лимит токенов на ответ. У моделей с рассуждениями (deepseek-v4-*) он включает
+    # и сами рассуждения, поэтому при LLM_THINKING=true нужно ставить 4000+.
+    LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "1500"))
+    # Режим рассуждений DeepSeek: false — быстрые прямые ответы, true — модель сначала думает
+    LLM_THINKING: bool = os.getenv("LLM_THINKING", "false").lower() == "true"
+    LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "120"))  # секунд на один запрос к LLM
 
     # --- Пути к данным ---
     CHROMA_PATH: str = os.getenv("CHROMA_PATH", "./data/chroma")
