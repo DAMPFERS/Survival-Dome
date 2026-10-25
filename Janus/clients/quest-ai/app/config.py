@@ -16,7 +16,7 @@ class Settings:
     MISTRAL_MODEL: str = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
     MISTRAL_BASE_URL: str = "https://api.mistral.ai/v1"
 
-    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.35"))
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "600"))
 
     # --- Пути к данным ---
@@ -30,7 +30,7 @@ class Settings:
     TOP_K_CHUNKS: int = int(os.getenv("TOP_K_CHUNKS", "4"))  # сколько кусков лора подтягиваем на вопрос
 
     # --- Персонаж ---
-    CHARACTER_NAME: str = os.getenv("CHARACTER_NAME", "Хранитель Архива")
+    CHARACTER_NAME: str = os.getenv("CHARACTER_NAME", "Система «Купол»")
 
     # --- Админ-панель ---
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "change_me_please")

@@ -26,6 +26,9 @@ KEEPER_ALLOWED_ACTIONS: dict[str, list[str]] = {
     "fume_extraction_01": ["turn_on", "turn_off", "reset_alarm"],
     "supply_ventilation_01": ["turn_on", "turn_off", "set_speed", "set_mode", "reset_alarm"],
     "equipment_cooling_01": ["turn_on", "turn_off", "set_speed"],
+    # МС-ТЮК: теплица ФабЛаб и теплица Химлаб (реальные стенды)
+    "thermal_insulation_01": ["set_fan_pwm", "set_vacuum", "set_lock"],
+    "thermal_insulation_02": ["set_fan_pwm", "set_relay_fan_level", "set_lock"],
     "water_pump_01": ["turn_on", "turn_off", "reset_alarm"],
     "water_filter_01": ["switch_to_reserve", "force_flush"],
     "dome_sealing_01": ["open_valves", "close_valves", "seal_zone"],
@@ -62,8 +65,8 @@ DOME_CONTROL_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "control_power_line",
             "description": "Включить или выключить линию умного электрического щитка купола (линии 1–8: "
-                           "1 производственный отдел — рабочее место и вытяжка FabLab, 2 бокс ФабЛаб, "
-                           "3 3D-принтер, 4 ЧПУ-фрезер, 5 бокс Химлаб, 6 основное освещение, "
+                           "1 производственный отдел — рабочее место и вытяжка FabLab, 2 теплица ФабЛаб, "
+                           "3 3D-принтер, 4 ЧПУ-фрезер, 5 теплица Химлаб, 6 основное освещение, "
                            "7 аварийное освещение, 8 резервная). Линию со сработавшей защитой "
                            "возвращает действие reset_protection (control_dome_node).",
             "parameters": {
@@ -128,6 +131,30 @@ DOME_CONTROL_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "control_greenhouse",
+            "description": "Управление теплицами МС-ТЮК. fablab — теплица ФабЛаб: 6 вентиляторов (0–3 вдув, "
+                           "4–5 выдув), пылесос, 2 замка (0, 1). chemlab — теплица Химлаб: 2 вентилятора "
+                           "(0 вдув, 1 выдув), релейный вентилятор (уровень 0–10), общий замок на обе двери.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "greenhouse": {"type": "string", "enum": ["fablab", "chemlab"]},
+                    "action": {"type": "string", "enum": ["fan", "relay_fan", "vacuum", "lock", "unlock"],
+                               "description": "fan — ШИМ вентилятора; relay_fan — только chemlab; "
+                                              "vacuum — только fablab; lock/unlock — замок"},
+                    "fan": {"type": "integer", "description": "Для fan: индекс вентилятора"},
+                    "pwm": {"type": "integer", "description": "Для fan: ШИМ 0–255 (ниже ~30 вентилятор стоит)"},
+                    "level": {"type": "integer", "description": "Для relay_fan: уровень 0–10"},
+                    "on": {"type": "boolean", "description": "Для vacuum: включить (true) или выключить (false)"},
+                    "lock_index": {"type": "integer", "description": "Для lock/unlock в fablab: номер замка 0 или 1"},
+                },
+                "required": ["greenhouse", "action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "control_dome_node",
             "description": "Выполнить другое управляющее действие над узлом купола. Разрешённые действия: "
                            + _allowed_summary(),
@@ -173,6 +200,29 @@ def _parse_value(value: Any) -> Any:
         return text
 
 
+def _resolve_greenhouse(arguments: dict[str, Any]) -> tuple[str, str, Any]:
+    greenhouse, action = arguments.get("greenhouse"), arguments.get("action")
+    node_id = {"fablab": "thermal_insulation_01", "chemlab": "thermal_insulation_02"}.get(greenhouse)
+    if not node_id:
+        raise ValueError("Теплица должна быть fablab или chemlab")
+    if action == "fan":
+        if arguments.get("fan") is None or arguments.get("pwm") is None:
+            raise ValueError("Для вентилятора нужны fan и pwm")
+        return node_id, "set_fan_pwm", {"fan": int(arguments["fan"]), "pwm": int(arguments["pwm"])}
+    if action == "relay_fan" and greenhouse == "chemlab":
+        if arguments.get("level") is None:
+            raise ValueError("Для релейного вентилятора нужен level (0–10)")
+        return node_id, "set_relay_fan_level", int(arguments["level"])
+    if action == "vacuum" and greenhouse == "fablab":
+        return node_id, "set_vacuum", 1 if arguments.get("on", True) else 0
+    if action in ("lock", "unlock"):
+        locked = action == "lock"
+        if greenhouse == "chemlab":
+            return node_id, "set_lock", locked
+        return node_id, "set_lock", {"lock": int(arguments.get("lock_index", 0)), "locked": locked}
+    raise ValueError(f"Действие {action} недоступно для теплицы {greenhouse}")
+
+
 def resolve_tool_call(tool_name: str, arguments: dict[str, Any]) -> tuple[str, str, Any]:
     """
     Переводит вызов инструмента управления в (node_id, action, value).
@@ -198,6 +248,8 @@ def resolve_tool_call(tool_name: str, arguments: dict[str, Any]) -> tuple[str, s
         node_id = {"supply": "supply_ventilation_01", "fume": "fume_extraction_01"}.get(arguments.get("system"))
         action = {"on": "turn_on", "off": "turn_off"}.get(arguments.get("action"), arguments.get("action"))
         value = arguments.get("value")
+    elif tool_name == "control_greenhouse":
+        node_id, action, value = _resolve_greenhouse(arguments)
     elif tool_name == "control_dome_node":
         node_id, action, value = arguments.get("node_id"), arguments.get("action"), arguments.get("value")
     else:

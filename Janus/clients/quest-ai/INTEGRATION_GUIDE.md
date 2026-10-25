@@ -16,7 +16,7 @@ WebSocket: первым сообщением — `{"type": "auth", "key": DOME_A
 | `app/dome_client.py` | Подключение, авторизация, переподключение, телеметрия, каталог `describe_nodes`, `control` |
 | `app/prompts.py` | Сводка ключевых узлов купола для промпта Хранителя (`KEY_NODES`) |
 | `app/tools.py` | Инструменты LLM → действия узлов; граница полномочий Хранителя — `KEEPER_ALLOWED_ACTIONS` |
-| `app/panels.py` | Данные веб-панелей: участника (`/api/telemetry`) и энергетика (`/api/energy`) |
+| `app/panels.py` | Данные панели участника (`/api/telemetry`) |
 
 ## Ключ доступа
 

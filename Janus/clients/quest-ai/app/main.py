@@ -1,6 +1,6 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 import logging
 import json
@@ -12,7 +12,7 @@ from app.prompts import build_system_prompt
 from app.llm_adapter import get_llm_adapter
 from app.dome_client import dome_client
 from app.tools import DOME_CONTROL_TOOLS, STATUS_NODES, resolve_tool_call
-from app.panels import energy_telemetry, participant_telemetry
+from app.panels import participant_telemetry
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,7 +47,9 @@ async def shutdown():
 
 @app.get("/")
 async def index():
-    return FileResponse("static/chat.html")
+    # Панель участника лежит в static/ и ссылается на css/, js/, assets/ относительными путями,
+    # поэтому отдаём её из-под /static/, а не FileResponse с корня.
+    return RedirectResponse("/static/index.html")
 
 
 @app.get("/admin")
@@ -131,7 +133,7 @@ async def answer_player(user_message: str) -> str:
                     f"[COMMAND] {tool_name}: {json.dumps(arguments, ensure_ascii=False)} -> {result.get('message')}",
                 )
 
-            # 5. Результаты — в контекст, финальный ответ в характере персонажа
+            # 5. Результаты — в контекст, финальный ответ системы купола
             messages.append({"role": "assistant", "content": response_text or "Выполняю команду..."})
             results_lines = []
             for r in tool_results:
@@ -142,14 +144,14 @@ async def answer_player(user_message: str) -> str:
             messages.append({
                 "role": "user",
                 "content": "Результаты выполнения команд:\n" + "\n".join(results_lines)
-                           + "\n\nСообщи результат игроку в характере персонажа.",
+                           + "\n\nСообщи участнику результат кратко и по существу.",
             })
             answer = await llm.chat(messages)
         else:
-            answer = response_text or "Связь нарушена..."
+            answer = response_text or "Ответ не сформирован. Повторите запрос."
 
     except Exception as e:
-        answer = "Связь с духами прервалась... попробуйте спросить ещё раз."
+        answer = "Система купола временно не может обработать запрос. Повторите его через несколько секунд."
         logger.error(f"[LLM ERROR] {e}", exc_info=True)
 
     # 6. Сохраняем ответ
@@ -168,15 +170,10 @@ async def chat_ws(websocket: WebSocket):
         pass
 
 
-# ---------- API веб-панелей (static/files, static/files-energy) ----------
+# ---------- API веб-панели участника (static/index.html) ----------
 
 class ChatPayload(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
-
-
-class LinePayload(BaseModel):
-    line: int = Field(ge=1, le=8)
-    on: bool
 
 
 def _require_telemetry() -> dict:
@@ -194,29 +191,6 @@ async def api_chat(payload: ChatPayload):
 @app.get("/api/telemetry")
 async def api_telemetry():
     return participant_telemetry(_require_telemetry())
-
-
-@app.get("/api/energy")
-async def api_energy():
-    return energy_telemetry(_require_telemetry())
-
-
-@app.post("/api/energy/line")
-async def api_energy_line(payload: LinePayload):
-    """Кнопки линий панели энергетика: вкл/выкл линии щитка. Включение линии со сработавшей
-    защитой (TRIPPED / RCD_TRIP) — взвод защиты reset_protection: line_on сервер в этом случае отклоняет."""
-    action = "line_on" if payload.on else "line_off"
-    if payload.on:
-        lines = (dome_client.get_node_status("smart_panel_01") or {}).get("lines") or []
-        if len(lines) >= payload.line and lines[payload.line - 1].get("state") in ("TRIPPED", "RCD_TRIP"):
-            action = "reset_protection"
-    try:
-        result = await dome_client.send_control_command("smart_panel_01", action, payload.line)
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    if not result.get("success"):
-        raise HTTPException(status_code=409, detail=result.get("error", "Команда не выполнена"))
-    return {"ok": True, "line": payload.line, "on": payload.on, "action": action, "mode": result.get("mode")}
 
 
 # ---------- Админ API ----------
