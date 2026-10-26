@@ -124,7 +124,7 @@ logger = logging.getLogger("IntegratedServer")
 
 # ================= КОНФИГУРАЦИЯ =================
 HOST = os.getenv("DOME_HOST", "0.0.0.0")
-PORT = int(os.getenv("DOME_PORT", "8765"))
+PORT = int(os.getenv("DOME_PORT", "8766"))
 TELEMETRY_INTERVAL = float(os.getenv("DOME_TELEMETRY_INTERVAL", "2.0"))
 REAL_SYNC_INTERVAL = float(os.getenv("DOME_REAL_SYNC_INTERVAL", "1.0"))
 AUTH_TIMEOUT = float(os.getenv("DOME_AUTH_TIMEOUT", "10.0"))

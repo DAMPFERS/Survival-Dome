@@ -3,7 +3,7 @@ import time
 from klipper_printer import KlipperPrinter
 
 
-PRINTER_IP = "192.168.1.92"
+PRINTER_IP = "192.168.8.69"
 
 
 def test_monitoring():
@@ -282,7 +282,7 @@ def test_file_metadata():
         printer.stop()
 
 
-def test_upload_file():
+def B_PCB1_file():
     """Тест загрузки файла."""
     print("\n" + "=" * 60)
     print("ТЕСТ 5: Загрузка файла на принтер")
@@ -310,15 +310,15 @@ def test_upload_file():
             return
         
         # Путь к тестовому файлу
-        test_file = "gcode/EN4Pro_0.4_D2_1_Elegoo PLA _0.24_18m31s.gcode"
+        test_file = "gcode/B_PCB1.gcode"
         
         print(f"\nЗагрузка файла: {test_file}")
         print("Ожидание... (это может занять некоторое время)")
         
-        success = printer.upload_file(test_file, filename="test_upload.gcode")
+        success = printer.upload_file(test_file, filename="B_PCB1.gcode")
         
         if success:
-            print("✓ Файл успешно загружен на принтер как 'test_upload.gcode'")
+            print("✓ Файл успешно загружен на принтер как 'B_PCB1.gcode'")
         else:
             print("✗ Ошибка загрузки файла")
             status = printer.get_status()
@@ -360,7 +360,7 @@ def test_delete_file():
             return
         
         # Удаляем тестовый файл
-        test_file = "test_upload.gcode"
+        test_file = "B_PCB1.gcode"
         
         print(f"\nУдаление файла: {test_file}")
         
@@ -771,7 +771,7 @@ def main():
     elif choice == "4":
         test_file_metadata()
     elif choice == "5":
-        test_upload_file()
+        B_PCB1_file()
     elif choice == "6":
         test_delete_file()
     elif choice == "7":
@@ -779,7 +779,7 @@ def main():
     elif choice == "8":
         test_list_files()
         test_file_metadata()
-        test_upload_file()
+        B_PCB1_file()
         test_delete_file()
         test_start_print()
     elif choice == "9":

@@ -1,3 +1,4 @@
 # журналы участника (сервер) и сгенерированные недельные логи
 logs/
 debug_domes/*/participant_log/
+team_domes/
